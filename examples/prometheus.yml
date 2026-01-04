@@ -1,0 +1,26 @@
+# Prometheus Configuration for Ops Defender
+
+# Add this job to your prometheus.yml configuration
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Ops Defender metrics
+  - job_name: 'ops-defender'
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['localhost:8080']
+    metrics_path: '/metrics'
+    
+    # Optional: Add labels for multi-instance deployments
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'defender-01'
+      
+    # Optional: Add authentication if needed
+    # basic_auth:
+    #   username: 'prometheus'
+    #   password: 'your-password'

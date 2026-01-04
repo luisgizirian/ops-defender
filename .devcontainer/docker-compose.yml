@@ -1,0 +1,60 @@
+services:
+  devcontainer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    
+    volumes:
+      # Mount the workspace
+      - ..:/workspace:cached
+      
+      # Persist Go modules cache
+      - go-modules:/go/pkg/mod
+      
+      # Persist bash history
+      - bash-history:/commandhistory
+    
+    # Overrides default command so things don't shut down after the process ends.
+    command: sleep infinity
+    
+    # Set environment variables
+    environment:
+      # Connect to Redis service
+      - REDIS_URL=redis://redis:6379/0
+      # Development settings
+      - ANALYSIS_THRESHOLD=5
+      - BLOCK_DURATION=60
+      - MAX_TRACKED_IPS=10000
+    
+    # Use "forwardPorts" in devcontainer.json to forward an app port locally
+    # (Adding here just for documentation)
+    ports:
+      - "8080:8080"
+    
+    # Network setup
+    networks:
+      - ops-defender-dev
+    
+    # Depends on Redis for testing
+    depends_on:
+      - redis
+
+  # Redis service for development/testing
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    networks:
+      - ops-defender-dev
+    volumes:
+      - redis-data:/data
+
+networks:
+  ops-defender-dev:
+    driver: bridge
+
+volumes:
+  go-modules:
+  bash-history:
+  redis-data:

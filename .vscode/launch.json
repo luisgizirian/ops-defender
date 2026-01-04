@@ -1,0 +1,70 @@
+{
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"name": "Launch Ops Defender",
+			"type": "go",
+			"request": "launch",
+			"mode": "debug",
+			"program": "${workspaceFolder}/cmd/ops-defender",
+			"env": {
+				"PORT": "8080",
+				"ANALYSIS_THRESHOLD": "5",
+				"BLOCK_DURATION": "60",
+				"MAX_TRACKED_IPS": "10000",
+				"REDIS_URL": "redis://redis:6379/0"
+			},
+			"args": [],
+			"showLog": true
+		},
+		{
+			"name": "Launch Ops Defender (Memory Storage)",
+			"type": "go",
+			"request": "launch",
+			"mode": "debug",
+			"program": "${workspaceFolder}/cmd/ops-defender",
+			"env": {
+				"PORT": "8080",
+				"ANALYSIS_THRESHOLD": "5",
+				"BLOCK_DURATION": "60",
+				"MAX_TRACKED_IPS": "10000"
+			},
+			"args": [],
+			"showLog": true
+		},
+		{
+			"name": "Debug Tests",
+			"type": "go",
+			"request": "launch",
+			"mode": "test",
+			"program": "${workspaceFolder}",
+			"args": [
+				"-v"
+			],
+			"showLog": true
+		},
+		{
+			"name": "Debug Current Test",
+			"type": "go",
+			"request": "launch",
+			"mode": "test",
+			"program": "${fileDirname}",
+			"args": [
+				"-test.run",
+				"${selectedText}"
+			],
+			"showLog": true
+		},
+		{
+			"name": "Attach to Docker Container",
+			"type": "go",
+			"request": "attach",
+			"mode": "remote",
+			"remotePath": "/root",
+			"port": 2345,
+			"host": "localhost",
+			"showLog": true,
+			"trace": "verbose"
+		}
+	]
+}

@@ -1,0 +1,175 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build Ops Defender",
+			"type": "shell",
+			"command": "./scripts/build.sh",
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			},
+			"problemMatcher": [
+				"$go"
+			]
+		},
+		{
+			"label": "Run Tests",
+			"type": "shell",
+			"command": "go test -v ./...",
+			"group": {
+				"kind": "test",
+				"isDefault": true
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			},
+			"problemMatcher": [
+				"$go"
+			]
+		},
+		{
+			"label": "Run Attack Tests",
+			"type": "shell",
+			"command": "./scripts/test-attacks.sh",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			},
+			"dependsOn": [
+				"Start Ops Defender (Background)"
+			],
+			"dependsOrder": "sequence"
+		},
+		{
+			"label": "Run Load Test",
+			"type": "shell",
+			"command": "DURATION=60 RPS=20 ./scripts/load-test.sh",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			},
+			"dependsOn": [
+				"Start Ops Defender (Background)"
+			],
+			"dependsOrder": "sequence"
+		},
+		{
+			"label": "Start Ops Defender",
+			"type": "shell",
+			"command": "./ops-defender",
+			"isBackground": false,
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated"
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Start Ops Defender (Background)",
+			"type": "shell",
+			"command": "./ops-defender &",
+			"isBackground": true,
+			"presentation": {
+				"reveal": "silent",
+				"panel": "dedicated"
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Start Redis",
+			"type": "shell",
+			"command": "docker-compose up -d redis",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Stop Redis",
+			"type": "shell",
+			"command": "docker-compose down",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "View Stats",
+			"type": "shell",
+			"command": "curl -s http://localhost:8080/stats | jq",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Generate Report",
+			"type": "shell",
+			"command": "curl -s http://localhost:8080/report | jq",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Check Health",
+			"type": "shell",
+			"command": "curl -v http://localhost:8080/health",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Go: Install Tools",
+			"type": "shell",
+			"command": "go install github.com/go-delve/delve/cmd/dlv@latest && go install golang.org/x/tools/gopls@latest && go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Go: Tidy Modules",
+			"type": "shell",
+			"command": "go mod tidy",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Docker: Build Image",
+			"type": "shell",
+			"command": "docker build -t ops-defender:latest .",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Docker: Run Container",
+			"type": "shell",
+			"command": "docker run --rm -p 8080:8080 -e REDIS_URL=redis://redis:6379/0 --network ops-defender_default ops-defender:latest",
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated"
+			},
+			"problemMatcher": []
+		}
+	]
+}

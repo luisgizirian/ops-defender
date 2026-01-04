@@ -1,0 +1,41 @@
+# Binaries
+ops-defender
+defender
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
+# VSCode - keep workspace settings but ignore user-specific files
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/extensions.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Reports
+reports/
+__debug_bin*

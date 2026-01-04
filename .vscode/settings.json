@@ -1,0 +1,22 @@
+{
+	"go.testEnvVars": {
+		"ANALYSIS_THRESHOLD": "5",
+		"BLOCK_DURATION": "60",
+		"MAX_TRACKED_IPS": "10000"
+	},
+	"go.buildFlags": [
+		"-v"
+	],
+	"go.testFlags": [
+		"-v"
+	],
+	"go.coverOnSave": false,
+	"go.coverOnSingleTest": true,
+	"go.coverOnSingleTestFile": true,
+	"files.watcherExclude": {
+		"**/reports/**": true
+	},
+	"docker.dockerPath": "docker",
+	"docker.dockerComposePath": "docker compose",
+	"containers.containerCommand": "docker"
+}

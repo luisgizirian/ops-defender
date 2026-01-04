@@ -1,0 +1,53 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: ops-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+
+  ops-defender:
+    build: .
+    container_name: ops-defender
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - ANALYSIS_THRESHOLD=5
+      - BLOCK_DURATION=1440  # 24 hours
+      - REDIS_URL=redis://redis:6379/0
+      # Optional: Email reporting
+      # - EMAIL_ENABLED=true
+      # - EMAIL_TO=ops@example.com
+      # - EMAIL_FROM=defender@example.com
+      # - SMTP_HOST=smtp.gmail.com
+      # - SMTP_PORT=587
+      # - SMTP_USER=your-email@gmail.com
+      # - SMTP_PASSWORD=your-app-password
+    volumes:
+      - ./reports:/root/reports
+    depends_on:
+      - redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  nginx:
+    image: nginx:alpine
+    container_name: nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf.example:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - ops-defender
+    restart: unless-stopped
+
+volumes:
+  redis-data:
