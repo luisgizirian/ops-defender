@@ -181,7 +181,6 @@ func TestDefender_IsSuspicious(t *testing.T) {
 		{"/normal-path", false},
 		{"/api/users", false},
 		{"/wp-admin", true},
-		{"/../etc/passwd", true},
 		{"/script.php", true},
 		{"/.git/config", true},
 		{"/api/data", false},
@@ -191,6 +190,24 @@ func TestDefender_IsSuspicious(t *testing.T) {
 		result := defender.isSuspicious(tt.uri)
 		if result != tt.suspicious {
 			t.Errorf("URI %s: expected suspicious=%v, got %v", tt.uri, tt.suspicious, result)
+		}
+	}
+	
+	// Test path traversal separately (now in separate method)
+	pathTraversalTests := []struct {
+		uri           string
+		hasTraversal bool
+	}{
+		{"/../etc/passwd", true},
+		{"/normal-path", false},
+		{"/scripts/../config", true},
+		{"/api/data", false},
+	}
+	
+	for _, tt := range pathTraversalTests {
+		result := defender.hasPathTraversal(tt.uri)
+		if result != tt.hasTraversal {
+			t.Errorf("URI %s: expected path traversal=%v, got %v", tt.uri, tt.hasTraversal, result)
 		}
 	}
 }
@@ -757,6 +774,231 @@ func TestDefender_SimulationMode(t *testing.T) {
 
 	if !inCache {
 		t.Error("Expected IP to be in blocked cache even in simulation mode")
+	}
+}
+
+func TestDefender_StaticAssetWhitelisting(t *testing.T) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    3,
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+	})
+
+	ip := "192.168.1.50"
+	
+	// Send 5 legitimate static asset requests
+	staticAssets := []string{
+		"/scripts/app.js",
+		"/css/style.css",
+		"/images/logo.png",
+		"/lib/jquery.min.js",
+		"/fonts/roboto.woff2",
+	}
+	
+	for _, uri := range staticAssets {
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.Header.Set("X-Real-IP", ip)
+		req.Header.Set("X-Original-URI", uri)
+		
+		w := httptest.NewRecorder()
+		defender.CheckRequest(w, req)
+		
+		if w.Code != http.StatusOK {
+			t.Errorf("Expected static asset request to be allowed, got %d for %s", w.Code, uri)
+		}
+	}
+	
+	// Wait for analysis
+	time.Sleep(100 * time.Millisecond)
+	
+	// IP should NOT be blocked (all requests were whitelisted)
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("X-Real-IP", ip)
+	req.Header.Set("X-Original-URI", "/any-path")
+	
+	w := httptest.NewRecorder()
+	defender.CheckRequest(w, req)
+	
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected IP with only static assets to NOT be blocked, got %d", w.Code)
+	}
+	
+	// Verify whitelist counter increased
+	defender.mu.RLock()
+	whitelisted := defender.whitelistedRequests
+	defender.mu.RUnlock()
+	
+	if whitelisted != int64(len(staticAssets)) {
+		t.Errorf("Expected %d whitelisted requests, got %d", len(staticAssets), whitelisted)
+	}
+}
+
+func TestDefender_PartialWhitelisting(t *testing.T) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    5,
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+	})
+
+	ip := "192.168.1.51"
+	
+	// Send 4 static asset requests + 1 suspicious request
+	requests := []string{
+		"/scripts/app.js",
+		"/css/style.css",
+		"/images/logo.png",
+		"/lib/jquery.min.js",
+		"/wp-admin", // Suspicious!
+	}
+	
+	for _, uri := range requests {
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.Header.Set("X-Real-IP", ip)
+		req.Header.Set("X-Original-URI", uri)
+		
+		w := httptest.NewRecorder()
+		defender.CheckRequest(w, req)
+		
+		// All requests allowed initially (deferred analysis)
+		if w.Code != http.StatusOK {
+			t.Errorf("Expected initial request to be allowed, got %d for %s", w.Code, uri)
+		}
+	}
+	
+	// Wait for analysis
+	time.Sleep(100 * time.Millisecond)
+	
+	// IP SHOULD be blocked (1 suspicious request)
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("X-Real-IP", ip)
+	req.Header.Set("X-Original-URI", "/any-path")
+	
+	w := httptest.NewRecorder()
+	defender.CheckRequest(w, req)
+	
+	if w.Code != http.StatusNotFound {
+		t.Errorf("Expected IP with suspicious request to be blocked, got %d", w.Code)
+	}
+	
+	// Verify both whitelist and block counters
+	defender.mu.RLock()
+	whitelisted := defender.whitelistedRequests
+	suspiciousBlocks := defender.suspiciousBlocks
+	defender.mu.RUnlock()
+	
+	if whitelisted != 4 {
+		t.Errorf("Expected 4 whitelisted requests, got %d", whitelisted)
+	}
+	
+	if suspiciousBlocks != 1 {
+		t.Errorf("Expected 1 suspicious block, got %d", suspiciousBlocks)
+	}
+}
+
+func TestDefender_PathTraversalOnStaticAssets(t *testing.T) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    3,
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+	})
+
+	ip := "192.168.1.52"
+	
+	// Send static asset requests with path traversal
+	requests := []string{
+		"/scripts/../../../etc/passwd",
+		"/css/../../config.php",
+		"/images/logo.png", // Legitimate
+	}
+	
+	for _, uri := range requests {
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.Header.Set("X-Real-IP", ip)
+		req.Header.Set("X-Original-URI", uri)
+		
+		w := httptest.NewRecorder()
+		defender.CheckRequest(w, req)
+		
+		if w.Code != http.StatusOK {
+			t.Errorf("Expected initial request to be allowed, got %d for %s", w.Code, uri)
+		}
+	}
+	
+	// Wait for analysis
+	time.Sleep(100 * time.Millisecond)
+	
+	// IP SHOULD be blocked (path traversal on whitelisted paths)
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("X-Real-IP", ip)
+	req.Header.Set("X-Original-URI", "/any-path")
+	
+	w := httptest.NewRecorder()
+	defender.CheckRequest(w, req)
+	
+	if w.Code != http.StatusNotFound {
+		t.Errorf("Expected IP with path traversal to be blocked, got %d", w.Code)
+	}
+	
+	// Verify path traversal counter
+	defender.mu.RLock()
+	pathTraversalBlocks := defender.pathTraversalBlocks
+	defender.mu.RUnlock()
+	
+	if pathTraversalBlocks != 1 {
+		t.Errorf("Expected 1 path traversal block, got %d", pathTraversalBlocks)
+	}
+}
+
+func TestDefender_WhitelistPatterns(t *testing.T) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    100,
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+	})
+
+	tests := []struct {
+		uri         string
+		whitelisted bool
+	}{
+		{"/scripts/app.js", true},
+		{"/scripts/vendor.min.js", true},
+		{"/css/style.css", true},
+		{"/images/logo.png", true},
+		{"/images/icon.svg", true},
+		{"/lib/jquery.min.js", true},
+		{"/fonts/roboto.woff2", true},
+		{"/assets/bundle.js", true},
+		{"/api/users", false},
+		{"/wp-admin", false},
+		{"/normal-path", false},
+		{"/scripts/../etc/passwd", false}, // Path matches but has traversal
+	}
+
+	for _, tt := range tests {
+		result := defender.isWhitelisted(tt.uri)
+		if result != tt.whitelisted {
+			t.Errorf("URI %s: expected whitelisted=%v, got %v", tt.uri, tt.whitelisted, result)
+		}
 	}
 }
 
