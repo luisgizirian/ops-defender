@@ -38,7 +38,7 @@ Ops Defender is a high-performance **HTTP-based** request monitoring service des
 
 **Core Architecture:** Proxy (Nginx/Caddy/Traefik/HAProxy/etc.) → Ops Defender `/check` endpoint → Pattern Analysis → Block Decision
 
-**HTTP-Based Design:** The `/check` endpoint accepts HTTP requests with `X-Real-IP` and `X-Original-URI` headers, returning 200 (allow) or 404 (block). This simple HTTP API makes it compatible with any proxy that can:
+**HTTP-Based Design:** The `/check` endpoint accepts HTTP requests with `X-Real-IP` and `X-Original-URI` headers, returning 200 (allow) or 403 (block). This simple HTTP API makes it compatible with any proxy that can:
 1. Forward requests to an HTTP endpoint
 2. Make routing decisions based on HTTP status codes
 3. Pass client IP and URI as headers
@@ -56,7 +56,7 @@ Ops Defender uses layered caching to minimize latency and Redis calls:
 3. **Tier 3 - Redis Storage (persistent):** Fallback for unknown IPs, provides distributed state across instances
 
 **Request Flow Example:**
-- Blocked IP: Check Tier 1 cache → instant 404 (no Redis call)
+- Blocked IP: Check Tier 1 cache → instant 403 (no Redis call)
 - New IP: Miss all tiers → query Redis → create tracker → allow through
 - Active IP: Skip Tier 1 → found in Tier 2 → log request → allow through
 
@@ -80,6 +80,46 @@ go d.analysisWorker()
 
 Never add blocking I/O or heavy computation to `CheckRequest()` - it must respond in microseconds.
 
+### Fail-Open Redis Error Handling
+
+**CRITICAL:** Redis connectivity errors result in fail-open behavior (allow requests) rather than HTTP 500 errors:
+
+**Design Principle:** When Redis/storage is unavailable, **allow traffic through** rather than blocking all requests. This prioritizes availability over perfect security during infrastructure issues.
+
+**Implementation:**
+```go
+// CheckRequest: Redis error allows request through
+blocked, err := d.storage.IsBlocked(ctx, ip)
+if err != nil {
+    // Fail-open: Allow request through, don't return 500
+    log.Printf("WARNING: Redis error, allowing request: %v", err)
+    blocked = false
+}
+
+// MetricsHandler: Redis error returns partial data (not 500)
+blockedIPs, err := d.storage.GetBlockedIPs(ctx)
+if err != nil {
+    // Continue with empty data instead of returning 500
+    log.Printf("WARNING: Redis error, continuing with partial data: %v", err)
+    blockedIPs = []storage.BlockedIPInfo{}
+}
+```
+
+**Affected Endpoints:**
+- `/check` - Always returns 200 (allow) on Redis errors
+- `/metrics` - Returns partial metrics with zero blocked IPs
+- `/timeseries` - Returns partial time-series with empty event history
+- `/stats` - Returns stats with empty blocked IP list
+- `/report` - Returns report with empty block events
+
+**Why Fail-Open:**
+1. **Availability over security:** Better to allow some malicious traffic temporarily than block all legitimate traffic
+2. **Redis is optional:** System can operate (degraded) without Redis using in-memory caching
+3. **Testing flexibility:** Allows testing without Redis infrastructure
+4. **Operational resilience:** Service continues during Redis maintenance/failures
+
+**When NOT to use fail-open:** If your threat model requires hard blocking (e.g., protecting highly sensitive endpoints), consider changing fail-open to fail-closed and ensuring Redis HA.
+
 ### IP Promotion/Demotion Mechanics
 
 **How Blocked IPs Stay in Tier 1 Cache Without Demotion:**
@@ -98,9 +138,9 @@ d.storage.BlockIP(ctx, ip, reason, d.blockDuration)   // Also stored in Redis
 // In CheckRequest() - Line 109-118:
 if expiresAt, blocked := d.blockedCache[ip]; blocked {
     if time.Now().Before(expiresAt) {
-        // Still valid - return 404 immediately
+        // Still valid - return 403 immediately
         // IP STAYS IN CACHE - no demotion!
-        w.WriteHeader(http.StatusNotFound)
+        w.WriteHeader(http.StatusForbidden)
         return
     }
     // Only removed if expired
@@ -249,6 +289,7 @@ examples/            - Monitoring configurations, dashboards, integration guides
 - Redis keys use prefixes: `blocked:{ip}` for blocked IPs, `block_events` sorted set for events
 - TTL is critical: Blocked IPs auto-expire after `blockDuration`
 - Historical events kept for 7 days, cleaned via `ZRemRangeByScore`
+- **CRITICAL:** Always return empty slice `[]BlockedIPInfo{}` on error, never `nil` (prevents nil pointer issues)
 
 **main.go:**
 - All HTTP handlers registered here: `/check`, `/health`, `/stats`, `/report`, `/metrics`, `/timeseries`, `/events`
@@ -368,7 +409,7 @@ done
 curl -H "X-Real-IP: 10.0.0.1" \
      -H "X-Original-URI: /any/path" \
      http://localhost:8080/check
-# Should return 404
+# Should return 403 (Forbidden)
 ```
 
 ## Environment Variables Reference
@@ -380,7 +421,7 @@ curl -H "X-Real-IP: 10.0.0.1" \
 | `BLOCK_DURATION` | `60` | Block duration (minutes) | 1440 = 24 hours |
 | `MAX_TRACKED_IPS` | `10000` | Memory limit protection | ~5MB at 10k IPs, triggers preemptive eviction at 93% (9300 IPs) |
 | `EVICTION_BATCH_PERCENT` | `0.10` | Bulk eviction percentage | Evicts 10% of IPs when threshold reached |
-| `SIMULATION_MODE` | `false` | Testing mode | When `true`, logs blocks but allows all requests (200) instead of blocking (404) |
+| `SIMULATION_MODE` | `false` | Testing mode | When `true`, logs blocks but allows all requests (200) instead of blocking (403) |
 | `REDIS_URL` | - | Redis connection | `redis://host:6379/0` format |
 | `EMAIL_ENABLED` | `false` | Enable email reports | Requires SMTP config |
 | `APPINSIGHTS_ENABLED` | `false` | Enable Azure telemetry | Requires instrumentation key |
@@ -393,7 +434,7 @@ curl -H "X-Real-IP: 10.0.0.1" \
 
 **HTTP API Design:** Ops Defender exposes a `/check` endpoint that accepts any HTTP request and returns:
 - **200 OK** = Allow request (proxy continues to backend)
-- **404 Not Found** = Block request (proxy denies access)
+- **403 Forbidden** = Block request (proxy denies access)
 
 **Required Headers:**
 - `X-Real-IP` - Client's IP address
@@ -424,7 +465,7 @@ location = /auth {
 
 location / {
     # If /check returns 200: request proceeds
-    # If /check returns 404: Nginx blocks with 404
+    # If /check returns 403: Nginx blocks with 403
     proxy_pass http://backend;
 }
 ```
@@ -551,7 +592,7 @@ Ops Defender is an **auth validation service**, not an application server. Only 
 
 **Test 11 (Legitimate Request) Always Fails - This is Expected Behavior**
 
-The test sends requests to `/api/users` and expects HTTP 200, but Ops Defender returns 404. This is **not a bug**.
+The test sends requests to `/api/users` and expects HTTP 200, but Ops Defender returns 403/404. This is **not a bug**.
 
 **Why:**
 - Ops Defender is an **auth validation service**, not an application server
@@ -561,7 +602,7 @@ The test sends requests to `/api/users` and expects HTTP 200, but Ops Defender r
 **The Test is Incorrect:**
 ```bash
 # Current test (wrong approach):
-curl http://localhost:8080/api/users  # Returns 404 from Ops Defender
+curl http://localhost:8080/api/users  # Returns 403/404 from Ops Defender
 
 # Correct test should use /check endpoint:
 curl -H "X-Real-IP: 192.168.1.200" \

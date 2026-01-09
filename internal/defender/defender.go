@@ -190,7 +190,9 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 	if !exists {
 		blocked, err := d.storage.IsBlocked(ctx, ip)
 		if err != nil {
-			log.Printf("Error checking block status: %v", err)
+			// Fail-open: On Redis error, allow request through (don't block)
+			log.Printf("WARNING: Redis error checking block status for %s, allowing request: %v", ip, err)
+			blocked = false  // Explicitly set to false to allow request
 		}
 		
 		if blocked {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"time"
@@ -24,8 +25,9 @@ func (d *Defender) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := context.Background()
 	blockedIPs, err := d.storage.GetBlockedIPs(ctx)
 	if err != nil {
-		http.Error(w, "Failed to fetch blocked IPs", http.StatusInternalServerError)
-		return
+		// Fail-open: Log error but continue with empty data (don't return 500)
+		log.Printf("WARNING: Redis error in MetricsHandler, continuing with partial data: %v", err)
+		blockedIPs = []storage.BlockedIPInfo{}
 	}
 
 	// Calculate usage percentage
@@ -118,8 +120,9 @@ func (d *Defender) TimeSeriesHandler(w http.ResponseWriter, r *http.Request) {
 	// Get block events within the time range
 	events, err := d.storage.GetRecentBlockEvents(ctx, startTime)
 	if err != nil {
-		http.Error(w, "Failed to fetch block events", http.StatusInternalServerError)
-		return
+		// Fail-open: Log error but continue with empty events (don't return 500)
+		log.Printf("WARNING: Redis error in TimeSeriesHandler, continuing with partial data: %v", err)
+		events = []storage.BlockEvent{}
 	}
 
 	// Create time series buckets

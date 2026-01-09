@@ -92,12 +92,12 @@ test_request() {
     
     # Verify expected behavior
     if [ "$expected_after_threshold" = "blocked" ]; then
-        if [ "$final_response" = "404" ]; then
+        if [ "$final_response" = "403" ]; then
             echo -e "  ${GREEN}✓ PASSED${NC} - IP correctly blocked"
             PASSED_TESTS=$((PASSED_TESTS + 1))
             return 0
         else
-            echo -e "  ${RED}✗ FAILED${NC} - Expected 404 (blocked), got ${final_response}"
+            echo -e "  ${RED}✗ FAILED${NC} - Expected 403 (blocked), got ${final_response}"
             FAILED_TESTS=$((FAILED_TESTS + 1))
             return 1
         fi
@@ -147,12 +147,12 @@ test_rate_limit() {
     
     echo -e "  Final status: ${final_response}"
     
-    if [ "$final_response" = "404" ]; then
+    if [ "$final_response" = "403" ]; then
         echo -e "  ${GREEN}✓ PASSED${NC} - Rate limit triggered, IP blocked"
         PASSED_TESTS=$((PASSED_TESTS + 1))
         return 0
     else
-        echo -e "  ${RED}✗ FAILED${NC} - Expected 404 (blocked), got ${final_response}"
+        echo -e "  ${RED}✗ FAILED${NC} - Expected 403 (blocked), got ${final_response}"
         FAILED_TESTS=$((FAILED_TESTS + 1))
         return 1
     fi
