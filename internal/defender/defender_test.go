@@ -83,7 +83,7 @@ func TestDefender_CheckRequest_BlocksSuspiciousPath(t *testing.T) {
 	w := httptest.NewRecorder()
 	defender.CheckRequest(w, req)
 	
-	if w.Code != http.StatusNotFound {
+	if w.Code != http.StatusForbidden {
 		t.Errorf("Expected IP to be blocked after suspicious patterns detected, got %d", w.Code)
 	}
 }

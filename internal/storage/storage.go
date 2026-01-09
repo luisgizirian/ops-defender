@@ -97,7 +97,8 @@ func (rs *RedisStorage) UnblockIP(ctx context.Context, ip string) error {
 func (rs *RedisStorage) GetBlockedIPs(ctx context.Context) ([]BlockedIPInfo, error) {
 	keys, err := rs.client.Keys(ctx, "blocked:*").Result()
 	if err != nil {
-		return nil, err
+		// Return empty slice instead of nil to prevent nil pointer issues
+		return []BlockedIPInfo{}, err
 	}
 
 	var blocked []BlockedIPInfo

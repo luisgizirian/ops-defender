@@ -50,8 +50,8 @@ The service analyzes incoming requests asynchronously, tracks suspicious pattern
 3. Requests are **logged asynchronously** to memory
 4. Background worker **analyzes patterns offline**
 5. If suspicious patterns detected, IP is **marked as blocked**
-6. **Subsequent requests** from blocked IPs return **404 Not Found**
-7. **Proxy blocks request** based on 404 response
+6. **Subsequent requests** from blocked IPs return **403 Forbidden**
+7. **Proxy blocks request** based on 403 response
 8. **Zero performance impact** on request processing - analysis happens in background
 
 This HTTP-based validation approach works with any proxy that can make authorization decisions based on HTTP status codes.
@@ -206,6 +206,49 @@ IP Blocked → Add to blockedCache (memory) → Store in Redis (TTL=24h)
     After 24h: Redis expires, cache cleaned up
 ```
 
+### Fail-Open Error Handling
+
+**Resilience During Infrastructure Issues**
+
+Ops Defender prioritizes **availability over perfect security** when Redis/storage becomes unavailable. If Redis connectivity fails, the service **fails open** (allows requests) rather than blocking all traffic with HTTP 500 errors.
+
+**Behavior on Redis Errors:**
+- ✓ `/check` endpoint: Always returns `200 OK` (allow request through)
+- ✓ `/metrics`, `/timeseries`, `/stats`: Return partial data with empty blocked IP lists (never `nil`)
+- ✓ `/report`: Returns report with empty block events
+- ✓ In-memory caching continues to work (previously blocked IPs still blocked from cache)
+- ✓ Service logs warnings about Redis errors but continues operating
+- ✓ Storage methods return empty slices `[]BlockedIPInfo{}` instead of `nil` to prevent runtime errors
+
+**Why Fail-Open:**
+1. **Availability Priority:** Better to allow some malicious traffic temporarily than block all legitimate users
+2. **Redis is Optional:** System designed to work (degraded) without Redis using in-memory caching
+3. **Testing Flexibility:** Run and test without Redis infrastructure
+4. **Operational Resilience:** Service continues during Redis maintenance/failures
+
+**Example Error Handling:**
+```go
+// Redis error in /check endpoint
+blocked, err := storage.IsBlocked(ctx, ip)
+if err != nil {
+    log.Printf("WARNING: Redis error, allowing request: %v", err)
+    blocked = false  // Fail-open: allow request through
+}
+```
+
+**When This Matters:**
+- **Production:** During Redis outages, legitimate traffic continues uninterrupted
+- **Testing:** Can run without Redis dependency for local development
+- **Staging:** Test configurations without full infrastructure
+
+**Security Consideration:**  
+If your threat model requires **hard blocking** (fail-closed) behavior where all traffic should be blocked during infrastructure failures, you'll need to modify the error handling in the following handlers:
+- `CheckRequest()` in [internal/defender/defender.go](internal/defender/defender.go)
+- `MetricsHandler()` in [internal/defender/metrics.go](internal/defender/metrics.go)  
+- `TimeSeriesHandler()` in [internal/defender/metrics.go](internal/defender/metrics.go)
+
+For high-security environments, combine fail-closed logic with Redis High Availability (HA) setup.
+
 ### Simulation Mode
 
 **Testing Without Impact**
@@ -314,7 +357,7 @@ example.com {
         }
     }
     handle @blocked {
-        respond 404
+        respond 403
     }
     reverse_proxy localhost:3000
 }
@@ -355,11 +398,11 @@ frontend http-in
     RewriteEngine On
     RewriteCond %{ENV:Ops_CHECK} !=passed
     RewriteRule .* http://localhost:8080/check [P,E=Ops_CHECK:passed]
-    # Handle 404 response from Ops Defender
+    # Handle 403 response from Ops Defender
 </Location>
 ```
 
-> **Note:** The above examples demonstrate the HTTP-based integration approach. Exact configuration varies by proxy. The key is forwarding the request to `/check` with `X-Real-IP` and `X-Original-URI` headers, then blocking on 404 response.
+> **Note:** The above examples demonstrate the HTTP-based integration approach. Exact configuration varies by proxy. The key is forwarding the request to `/check` with `X-Real-IP` and `X-Original-URI` headers, then blocking on 403 Forbidden response.
 
 ## API Endpoints
 
@@ -367,7 +410,7 @@ frontend http-in
 
 #### `GET /check`
 - **Purpose**: Validate incoming requests (called by Nginx auth_request)
-- **Returns**: 200 (allow) or 404 (block)
+- **Returns**: 200 (allow) or 403 (block)
 - **Headers Required**: `X-Real-IP`, `X-Original-URI`
 
 #### `GET /health`
@@ -735,7 +778,7 @@ docker-compose logs -f ops-defender
 
 # 4. Test from external client
 curl -v http://your-server.com/../../../etc/passwd
-# Should return 404 after analysis threshold
+# Should return 403 (Forbidden) after analysis threshold
 
 # 5. Check reports
 curl http://localhost:8080/stats
@@ -813,8 +856,8 @@ docker-compose down
 ```
 1. Proxy → Ops Defender /check endpoint
 2. Tier 1: Cache HIT (blocked, expires at X)
-3. Return 404 immediately
-4. Proxy blocks request (404 to client)
+3. Return 403 Forbidden immediately
+4. Proxy blocks request (403 to client)
 5. No Redis call, no further processing
 ```
 
@@ -824,7 +867,7 @@ docker-compose down
 2. Add to blockedCache (Tier 1) with expiry time
 3. Store in Redis (Tier 3) with TTL
 4. Record block event for reporting
-5. Future requests instantly blocked (Tier 1) → Proxy returns 404
+5. Future requests instantly blocked (Tier 1) → Proxy returns 403
 ```
 ```
 
@@ -838,7 +881,7 @@ Blocked IP Added:
 - Also stored in Redis with same TTL
 
 Subsequent Requests (e.g., attacker retrying):
-- Check blockedCache → HIT → return 404 (~100 nanoseconds)
+- Check blockedCache → HIT → return 403 (~100 nanoseconds)
 - IP STAYS in cache - no demotion to Redis
 - No additional Redis calls needed
 
@@ -983,7 +1026,7 @@ See [DDOS-DEFENSE.md](DDOS-DEFENSE.md) for detailed analysis of DDoS protection 
 
 ### Test 11 (test-attacks.sh) Fails - Expected Behavior
 
-**Symptom:** Test 11 "Legitimate Request" returns 404 instead of 200 when accessing `/api/users`
+**Symptom:** Test 11 "Legitimate Request" returns 403/404 when accessing `/api/users`
 
 **Explanation:** This is **not a bug**. Ops Defender is an auth validation service, not an application server. It only implements:
 - `/check` - Auth validation endpoint (for Nginx)
@@ -994,7 +1037,7 @@ See [DDOS-DEFENSE.md](DDOS-DEFENSE.md) for detailed analysis of DDoS protection 
 **Why the test is misleading:**
 ```bash
 # Current test (incorrect):
-curl http://localhost:8080/api/users  # Returns 404
+curl http://localhost:8080/api/users  # Returns 403/404 (not a valid endpoint)
 
 # Correct approach:
 curl -H "X-Real-IP: 192.168.1.200" \

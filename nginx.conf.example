@@ -1,4 +1,13 @@
 # Example Nginx configuration for Ops Defender integration
+# 
+# Ops Defender returns:
+#   - 200 OK = Allow request to proceed
+#   - 403 Forbidden = Block request (malicious IP)
+#
+# Nginx auth_request behavior:
+#   - 200-299: Access allowed, continue to backend
+#   - 401/403: Access denied, return that status to client
+#   - 404+ : Treated as error, returns 500 (so we use 403 for blocks)
 
 server {
     listen 80;
