@@ -23,9 +23,10 @@ const (
 )
 
 type RequestLog struct {
-	URI       string
-	Timestamp time.Time
-	UserAgent string
+	URI           string
+	Timestamp     time.Time
+	UserAgent     string
+	IsWhitelisted bool
 }
 
 type IPTracker struct {
@@ -47,24 +48,29 @@ type DefenderOptions struct {
 }
 
 type Defender struct {
-	mu                 sync.RWMutex
-	ipTrackers         map[string]*IPTracker  // In-memory for active tracking
-	blockedCache       map[string]time.Time   // In-memory cache of blocked IPs (IP -> expiry time)
-	storage            storage.Storage                 // Redis or memory for blocked IPs
-	analysisThreshold  int
-	blockDuration      time.Duration
-	suspiciousPatterns []*regexp.Regexp
-	analysisChan       chan string
-	totalRequests      int64
-	blockedRequests    int64
-	maxTrackedIPs      int                     // Maximum number of IPs to track simultaneously
-	droppedIPs         int64                   // Counter for IPs dropped due to memory limits
-	evictionBatchPct   float64                 // Percentage of IPs to evict in bulk (default 0.10 = 10%)
-	evictionInProgress bool                    // Flag to prevent concurrent evictions
-	evictionThreshold  int                     // Preemptive eviction threshold (e.g., 90% of max)
-	simulationMode     bool                    // When true, log blocks but don't actually block requests
-	telemetry          *AppInsightsTelemetry   // Azure Application Insights telemetry
-	eventStream        *EventStream            // Real-time event stream
+	mu                    sync.RWMutex
+	ipTrackers            map[string]*IPTracker  // In-memory for active tracking
+	blockedCache          map[string]time.Time   // In-memory cache of blocked IPs (IP -> expiry time)
+	storage               storage.Storage                 // Redis or memory for blocked IPs
+	analysisThreshold     int
+	blockDuration         time.Duration
+	suspiciousPatterns    []*regexp.Regexp
+	whitelistPatterns     []*regexp.Regexp       // Static asset patterns to exclude from analysis
+	pathTraversalPatterns []*regexp.Regexp       // Path traversal patterns (checked on all requests)
+	analysisChan          chan string
+	totalRequests         int64
+	blockedRequests       int64
+	whitelistedRequests   int64                  // Counter for whitelisted static asset requests
+	pathTraversalBlocks   int64                  // Counter for blocks due to path traversal
+	suspiciousBlocks      int64                  // Counter for blocks due to suspicious patterns
+	maxTrackedIPs         int                    // Maximum number of IPs to track simultaneously
+	droppedIPs            int64                  // Counter for IPs dropped due to memory limits
+	evictionBatchPct      float64                // Percentage of IPs to evict in bulk (default 0.10 = 10%)
+	evictionInProgress    bool                   // Flag to prevent concurrent evictions
+	evictionThreshold     int                    // Preemptive eviction threshold (e.g., 90% of max)
+	simulationMode        bool                   // When true, log blocks but don't actually block requests
+	telemetry             *AppInsightsTelemetry  // Azure Application Insights telemetry
+	eventStream           *EventStream           // Real-time event stream
 }
 
 func NewDefender(opts DefenderOptions) *Defender {
@@ -105,9 +111,36 @@ func NewDefender(opts DefenderOptions) *Defender {
 		simulationMode:     opts.SimulationMode,
 	}
 
-	// Initialize suspicious patterns
+	// Initialize path traversal patterns (checked on ALL requests including whitelisted)
+	pathTraversalPatterns := []string{
+		`\.\.\/`,     // Path traversal forward slash
+		`\.\.\\`,     // Path traversal backslash
+	}
+
+	for _, pattern := range pathTraversalPatterns {
+		if re, err := regexp.Compile(`(?i)` + pattern); err == nil {
+			d.pathTraversalPatterns = append(d.pathTraversalPatterns, re)
+		}
+	}
+
+	// Initialize whitelist patterns for static assets
+	whitelistPatterns := []string{
+		`^/scripts/.*\.(js|css|map)$`,              // JavaScript, CSS, source maps
+		`^/images/.*\.(jpg|jpeg|png|gif|svg|webp|ico)$`, // Images
+		`^/lib/.*\.(js|css|map)$`,                  // Library files
+		`^/css/.*\.css$`,                           // Stylesheets
+		`^/fonts/.*\.(woff|woff2|ttf|eot|otf)$`,    // Fonts
+		`^/assets/.*\.(js|css|png|jpg|svg|woff|woff2)$`, // Generic assets
+	}
+
+	for _, pattern := range whitelistPatterns {
+		if re, err := regexp.Compile(`(?i)` + pattern); err == nil {
+			d.whitelistPatterns = append(d.whitelistPatterns, re)
+		}
+	}
+
+	// Initialize suspicious patterns (checked only on non-whitelisted requests)
 	patterns := []string{
-		`\.\.\/`,                    // Path traversal
 		`\/wp-admin`,                // WordPress admin
 		`\/wp-login`,                // WordPress login
 		`\/phpmyadmin`,              // phpMyAdmin
@@ -256,11 +289,18 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 		d.ipTrackers[ip] = tracker
 	}
 
+	// Check if this is a whitelisted static asset request
+	isWhitelisted := d.isWhitelisted(uri)
+	if isWhitelisted {
+		d.whitelistedRequests++
+	}
+
 	// Add request to log
 	tracker.RequestLogs = append(tracker.RequestLogs, RequestLog{
-		URI:       uri,
-		Timestamp: time.Now(),
-		UserAgent: userAgent,
+		URI:           uri,
+		Timestamp:     time.Now(),
+		UserAgent:     userAgent,
+		IsWhitelisted: isWhitelisted,
 	})
 
 	requestCount := len(tracker.RequestLogs)
@@ -297,32 +337,62 @@ func (d *Defender) analyzeIP(ip string) {
 	// Mark as analyzed
 	tracker.AnalysisCount++
 	
-	// Analyze request patterns
+	// Analyze request patterns with whitelist separation
 	suspicious := false
 	var suspiciousURI string
 	var reason string
+	isPathTraversal := false
 	
+	// Check ALL requests (including whitelisted) for path traversal
 	for _, reqLog := range tracker.RequestLogs {
-		if d.isSuspicious(reqLog.URI) {
+		if d.hasPathTraversal(reqLog.URI) {
 			suspicious = true
 			suspiciousURI = reqLog.URI
-			reason = "Suspicious URL pattern detected"
+			reason = "Path traversal attempt detected"
+			isPathTraversal = true
 			break
 		}
 	}
+	
+	// Check only non-whitelisted requests for other suspicious patterns
+	if !suspicious {
+		for _, reqLog := range tracker.RequestLogs {
+			if !reqLog.IsWhitelisted && d.isSuspicious(reqLog.URI) {
+				suspicious = true
+				suspiciousURI = reqLog.URI
+				reason = "Suspicious URL pattern detected"
+				break
+			}
+		}
+	}
 
-	// Check for high request rate in short time
+	// Check for high request rate in short time (excluding whitelisted static assets)
 	if !suspicious && len(tracker.RequestLogs) >= d.analysisThreshold {
-		firstReq := tracker.RequestLogs[0].Timestamp
-		lastReq := tracker.RequestLogs[len(tracker.RequestLogs)-1].Timestamp
-		duration := lastReq.Sub(firstReq)
+		// Count only non-whitelisted requests for rate limiting
+		nonWhitelistedCount := 0
+		var firstNonWhitelisted, lastNonWhitelisted time.Time
 		
-		// If threshold requests in less than 10 seconds, suspicious
-		if duration < 10*time.Second {
-			suspicious = true
-			reason = "High request rate"
-			log.Printf("High request rate detected for %s: %d requests in %.2f seconds", 
-				ip, len(tracker.RequestLogs), duration.Seconds())
+		for _, reqLog := range tracker.RequestLogs {
+			if !reqLog.IsWhitelisted {
+				if nonWhitelistedCount == 0 {
+					firstNonWhitelisted = reqLog.Timestamp
+				}
+				lastNonWhitelisted = reqLog.Timestamp
+				nonWhitelistedCount++
+			}
+		}
+		
+		// Only check rate limit if we have enough non-whitelisted requests
+		if nonWhitelistedCount >= d.analysisThreshold {
+			duration := lastNonWhitelisted.Sub(firstNonWhitelisted)
+			
+			// If threshold requests in less than 10 seconds, suspicious
+			if duration < 10*time.Second {
+				suspicious = true
+				reason = "High request rate"
+				log.Printf("High request rate detected for %s: %d non-whitelisted requests in %.2f seconds", 
+					ip, nonWhitelistedCount, duration.Seconds())
+			}
 		}
 	}
 
@@ -331,6 +401,13 @@ func (d *Defender) analyzeIP(ip string) {
 		tracker.BlockedAt = time.Now()
 		expiresAt := time.Now().Add(d.blockDuration)
 		requestCount := len(tracker.RequestLogs)
+		
+		// Update block metrics
+		if isPathTraversal {
+			d.pathTraversalBlocks++
+		} else {
+			d.suspiciousBlocks++
+		}
 		d.mu.Unlock()
 		
 		// Add to in-memory cache immediately
@@ -382,6 +459,26 @@ func (d *Defender) analyzeIP(ip string) {
 
 func (d *Defender) isSuspicious(uri string) bool {
 	for _, pattern := range d.suspiciousPatterns {
+		if pattern.MatchString(uri) {
+			return true
+		}
+	}
+	return false
+}
+
+// isWhitelisted checks if a URI matches whitelisted static asset patterns
+func (d *Defender) isWhitelisted(uri string) bool {
+	for _, pattern := range d.whitelistPatterns {
+		if pattern.MatchString(uri) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasPathTraversal checks if a URI contains path traversal attempts
+func (d *Defender) hasPathTraversal(uri string) bool {
+	for _, pattern := range d.pathTraversalPatterns {
 		if pattern.MatchString(uri) {
 			return true
 		}

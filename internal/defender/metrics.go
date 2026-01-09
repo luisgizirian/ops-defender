@@ -18,6 +18,9 @@ func (d *Defender) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	activeIPs := len(d.ipTrackers)
 	totalRequests := d.totalRequests
 	blockedRequests := d.blockedRequests
+	whitelistedRequests := d.whitelistedRequests
+	pathTraversalBlocks := d.pathTraversalBlocks
+	suspiciousBlocks := d.suspiciousBlocks
 	maxTrackedIPs := d.maxTrackedIPs
 	droppedIPs := d.droppedIPs
 	d.mu.RUnlock()
@@ -47,6 +50,18 @@ func (d *Defender) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "# HELP ops_defender_blocked_requests Total number of blocked requests\n")
 	fmt.Fprintf(w, "# TYPE ops_defender_blocked_requests counter\n")
 	fmt.Fprintf(w, "ops_defender_blocked_requests %d\n\n", blockedRequests)
+
+	fmt.Fprintf(w, "# HELP ops_defender_whitelisted_requests Total number of whitelisted static asset requests\n")
+	fmt.Fprintf(w, "# TYPE ops_defender_whitelisted_requests counter\n")
+	fmt.Fprintf(w, "ops_defender_whitelisted_requests %d\n\n", whitelistedRequests)
+
+	fmt.Fprintf(w, "# HELP ops_defender_path_traversal_blocks Total number of blocks due to path traversal\n")
+	fmt.Fprintf(w, "# TYPE ops_defender_path_traversal_blocks counter\n")
+	fmt.Fprintf(w, "ops_defender_path_traversal_blocks %d\n\n", pathTraversalBlocks)
+
+	fmt.Fprintf(w, "# HELP ops_defender_suspicious_pattern_blocks Total number of blocks due to suspicious patterns\n")
+	fmt.Fprintf(w, "# TYPE ops_defender_suspicious_pattern_blocks counter\n")
+	fmt.Fprintf(w, "ops_defender_suspicious_pattern_blocks %d\n\n", suspiciousBlocks)
 
 	fmt.Fprintf(w, "# HELP ops_defender_active_ips Number of actively tracked IPs\n")
 	fmt.Fprintf(w, "# TYPE ops_defender_active_ips gauge\n")
