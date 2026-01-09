@@ -6,6 +6,14 @@ set -e
 echo "=== IPv6 Support Test ==="
 echo
 
+# Check for required dependencies
+if ! command -v jq &> /dev/null; then
+    echo "Warning: jq is not installed. Stats output will be shown in raw JSON format."
+    JQ_AVAILABLE=false
+else
+    JQ_AVAILABLE=true
+fi
+
 # Start the service in background
 ./ops-defender &
 SERVER_PID=$!
@@ -63,12 +71,19 @@ sleep 2
 test_ip "2001:db8::2" "/api/test" "IPv6 - Should be blocked after analysis"
 
 echo "--- Checking Stats ---"
-curl -s http://localhost:8080/stats | jq '.'
+if [ "$JQ_AVAILABLE" = true ]; then
+    curl -s http://localhost:8080/stats | jq '.'
+else
+    curl -s http://localhost:8080/stats
+    echo
+fi
 
 # Cleanup
 echo
 echo "Stopping server..."
-kill $SERVER_PID
+kill $SERVER_PID 2>/dev/null || {
+    echo "Warning: Failed to gracefully stop server (PID $SERVER_PID)"
+}
 wait $SERVER_PID 2>/dev/null || true
 
 echo
