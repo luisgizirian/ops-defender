@@ -25,6 +25,7 @@ The service analyzes incoming requests asynchronously, tracks suspicious pattern
 
 ## Features
 
+- **IPv4 and IPv6 support** - Full support for both IPv4 and IPv6 addresses
 - **Deferred (offline) request pattern analysis** - Non-blocking, doesn't slow down legitimate traffic
 - **Automatic IP blocking** after suspicious behavior detected
 - **Configurable analysis threshold** (default: 5 requests)
@@ -732,17 +733,17 @@ The load test:
 
 # In another terminal, test suspicious patterns:
 
-# 1. Path traversal attempt
+# 1. Path traversal attempt (IPv4)
 curl -H "X-Real-IP: 192.168.1.100" \
      -H "X-Original-URI: /../../../etc/passwd" \
      http://localhost:8080/check
 
-# 2. SQL injection attempt
+# 2. SQL injection attempt (IPv4)
 curl -H "X-Real-IP: 192.168.1.101" \
      -H "X-Original-URI: /users?id=1 UNION SELECT * FROM users" \
      http://localhost:8080/check
 
-# 3. Open redirect attempt
+# 3. Open redirect attempt (IPv4)
 curl -H "X-Real-IP: 192.168.1.102" \
      -H "X-Original-URI: /login?redirect=http://evil.com" \
      http://localhost:8080/check
@@ -754,9 +755,40 @@ for i in {1..10}; do
        http://localhost:8080/check
 done
 
+# 5. IPv6 path traversal attempt
+curl -H "X-Real-IP: 2001:db8::1" \
+     -H "X-Original-URI: /../../../etc/passwd" \
+     http://localhost:8080/check
+
+# 6. IPv6 WordPress exploit
+for i in {1..5}; do
+  curl -H "X-Real-IP: 2001:db8::2" \
+       -H "X-Original-URI: /wp-admin" \
+       http://localhost:8080/check
+done
+
 # Check which IPs got blocked
 curl http://localhost:8080/stats | jq '.top_ips[] | select(.blocked == true)'
 ```
+
+### IPv6 Testing
+
+Run the dedicated IPv6 test suite:
+
+```bash
+# Build the service first
+./build.sh
+
+# Run comprehensive IPv6 tests
+./scripts/test-ipv6.sh
+```
+
+The test validates:
+- IPv6 address extraction from headers (X-Real-IP, X-Forwarded-For)
+- IPv6 address extraction from RemoteAddr
+- IPv6 blocking and storage
+- Mixed IPv4/IPv6 traffic handling
+- Various IPv6 formats (compressed, full, loopback, link-local)
 
 ### Live Testing with a Proxy
 
