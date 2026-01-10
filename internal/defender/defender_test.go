@@ -1042,7 +1042,7 @@ func TestDefender_ExcessiveURLEncodedNesting(t *testing.T) {
 			name:       "Excessive nesting with redirect param",
 			uri:        "/auth?redirect=/page1?redirect%3D/page2?redirect%253D/page3",
 			suspicious: true,
-			reason:     "3+ levels of URL encoding detected",
+			reason:     "4+ levels of URL encoding detected",
 		},
 		{
 			name:       "Simple redirect - no nesting",
