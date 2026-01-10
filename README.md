@@ -36,6 +36,7 @@ The service analyzes incoming requests asynchronously, tracks suspicious pattern
   - XSS (Cross-Site Scripting)
   - WordPress exploits
   - Open redirect attacks
+  - Excessive URL-encoded nesting (4+ levels)
   - Code injection attempts
   - Sensitive file access (.env, .git, etc.)
 - **Automated reporting** (daily and weekly)
@@ -692,6 +693,7 @@ The test script validates:
 - ✓ XSS attack detection
 - ✓ WordPress exploit detection
 - ✓ Open redirect detection
+- ✓ Excessive URL-encoded nesting detection
 - ✓ Sensitive file access blocking
 - ✓ Rate limit enforcement
 - ✓ Legitimate traffic handling
@@ -747,9 +749,14 @@ curl -H "X-Real-IP: 192.168.1.102" \
      -H "X-Original-URI: /login?redirect=http://evil.com" \
      http://localhost:8080/check
 
-# 4. Rate limiting (send 10 rapid requests)
+# 4. Excessive URL-encoded nesting
+curl -H "X-Real-IP: 192.168.1.103" \
+     -H "X-Original-URI: /cuenta/crear?returnUrl=/cuenta/crear?returnUrl%3D/cuenta/ingresar?returnUrl%253D/cuenta/crear?returnUrl%25253D/productos" \
+     http://localhost:8080/check
+
+# 5. Rate limiting (send 10 rapid requests)
 for i in {1..10}; do
-  curl -H "X-Real-IP: 192.168.1.103" \
+  curl -H "X-Real-IP: 192.168.1.104" \
        -H "X-Original-URI: /api/data" \
        http://localhost:8080/check
 done
