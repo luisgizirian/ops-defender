@@ -157,6 +157,7 @@ func NewDefender(opts DefenderOptions) *Defender {
 		`[?&](redirect|return|url|next|dest|destination|continue|view|target|redir|r|u)=https?://`,  // Open redirect
 		`[?&](redirect|return|url|next|dest|destination|continue|view|target|redir|r|u)=//`,         // Protocol-relative redirect
 		`[?&](redirect|return|url|next|dest|destination|continue|view|target|redir|r|u)=.*%2f%2f`,   // Encoded // in redirect
+		`(returnUrl|redirect|return|url|next|dest|destination|continue|view|target|redir).*%25[23]`,  // Excessive URL-encoded nesting (4+ levels)
 	}
 
 	for _, pattern := range patterns {

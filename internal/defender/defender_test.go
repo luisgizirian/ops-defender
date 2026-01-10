@@ -184,6 +184,12 @@ func TestDefender_IsSuspicious(t *testing.T) {
 		{"/script.php", true},
 		{"/.git/config", true},
 		{"/api/data", false},
+		// Excessive URL-encoded nesting tests
+		{"/cuenta/crear?returnUrl=/cuenta/crear?returnUrl%3D/cuenta/ingresar?returnUrl%253D/cuenta/crear?returnUrl%25253D/productos", true},
+		{"/login?returnUrl=/dashboard?returnUrl%3D/home?returnUrl%253D/account?returnUrl%25253D/settings", true},
+		{"/auth?redirect=/page1?redirect%3D/page2?redirect%253D/page3", true},
+		{"/simple?returnUrl=/dashboard", false}, // Single level is ok
+		{"/double?returnUrl=/page?returnUrl%3D/target", false}, // Two levels is ok
 	}
 
 	for _, tt := range tests {
@@ -999,6 +1005,79 @@ func TestDefender_WhitelistPatterns(t *testing.T) {
 		if result != tt.whitelisted {
 			t.Errorf("URI %s: expected whitelisted=%v, got %v", tt.uri, tt.whitelisted, result)
 		}
+	}
+}
+
+func TestDefender_ExcessiveURLEncodedNesting(t *testing.T) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    100,
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+	})
+
+	tests := []struct {
+		name       string
+		uri        string
+		suspicious bool
+		reason     string
+	}{
+		{
+			name:       "Excessive nesting with returnUrl (4+ levels)",
+			uri:        "/cuenta/crear?returnUrl=/cuenta/crear?returnUrl%3D/cuenta/ingresar?returnUrl%253D/cuenta/crear?returnUrl%25253D/productos",
+			suspicious: true,
+			reason:     "4+ levels of URL encoding detected",
+		},
+		{
+			name:       "Excessive nesting with mixed params",
+			uri:        "/login?returnUrl=/dashboard?returnUrl%3D/home?returnUrl%253D/account?returnUrl%25253D/settings",
+			suspicious: true,
+			reason:     "4+ levels of URL encoding detected",
+		},
+		{
+			name:       "Excessive nesting with redirect param",
+			uri:        "/auth?redirect=/page1?redirect%3D/page2?redirect%253D/page3",
+			suspicious: true,
+			reason:     "3+ levels of URL encoding detected",
+		},
+		{
+			name:       "Simple redirect - no nesting",
+			uri:        "/simple?returnUrl=/dashboard",
+			suspicious: false,
+			reason:     "Single level is acceptable",
+		},
+		{
+			name:       "Double nesting - acceptable",
+			uri:        "/double?returnUrl=/page?returnUrl%3D/target",
+			suspicious: false,
+			reason:     "Two levels is acceptable",
+		},
+		{
+			name:       "Normal URL with %20 encoding",
+			uri:        "/search?q=hello%20world",
+			suspicious: false,
+			reason:     "Simple space encoding is not suspicious",
+		},
+		{
+			name:       "URL with %3D (single encoded =)",
+			uri:        "/api/data?param%3Dvalue",
+			suspicious: false,
+			reason:     "Single level encoding is acceptable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := defender.isSuspicious(tt.uri)
+			if result != tt.suspicious {
+				t.Errorf("%s: expected suspicious=%v (reason: %s), got %v for URI: %s", 
+					tt.name, tt.suspicious, tt.reason, result, tt.uri)
+			}
+		})
 	}
 }
 
