@@ -317,17 +317,18 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 	})
 
 	requestCount := len(tracker.RequestLogs)
+	analysisCount := tracker.AnalysisCount
 	d.totalRequests++
-	
-	// Check for excessive URL-encoded nesting (be unforgiving - trigger analysis after just 1 occurrence)
-	hasExcessiveNesting := d.hasExcessiveNesting(uri)
 	d.mu.Unlock()
+	
+	// Check for excessive URL-encoded nesting outside critical section (regex matching can be expensive)
+	hasExcessiveNesting := d.hasExcessiveNesting(uri)
 
 	// Trigger analysis:
 	// - Immediately if excessive nesting detected and we have at least 1 request (first one allowed for analysis)
 	// - Or after normal threshold reached for other patterns (asynchronously)
-	if (hasExcessiveNesting && requestCount >= 1 && tracker.AnalysisCount == 0) || 
-	   (requestCount >= d.analysisThreshold && tracker.AnalysisCount == 0) {
+	if (hasExcessiveNesting && requestCount >= 1 && analysisCount == 0) || 
+	   (requestCount >= d.analysisThreshold && analysisCount == 0) {
 		select {
 		case d.analysisChan <- ip:
 		default:
