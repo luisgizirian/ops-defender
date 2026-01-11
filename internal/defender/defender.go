@@ -48,29 +48,31 @@ type DefenderOptions struct {
 }
 
 type Defender struct {
-	mu                    sync.RWMutex
-	ipTrackers            map[string]*IPTracker  // In-memory for active tracking
-	blockedCache          map[string]time.Time   // In-memory cache of blocked IPs (IP -> expiry time)
-	storage               storage.Storage                 // Redis or memory for blocked IPs
-	analysisThreshold     int
-	blockDuration         time.Duration
-	suspiciousPatterns    []*regexp.Regexp
-	whitelistPatterns     []*regexp.Regexp       // Static asset patterns to exclude from analysis
-	pathTraversalPatterns []*regexp.Regexp       // Path traversal patterns (checked on all requests)
-	analysisChan          chan string
-	totalRequests         int64
-	blockedRequests       int64
-	whitelistedRequests   int64                  // Counter for whitelisted static asset requests
-	pathTraversalBlocks   int64                  // Counter for blocks due to path traversal
-	suspiciousBlocks      int64                  // Counter for blocks due to suspicious patterns
-	maxTrackedIPs         int                    // Maximum number of IPs to track simultaneously
-	droppedIPs            int64                  // Counter for IPs dropped due to memory limits
-	evictionBatchPct      float64                // Percentage of IPs to evict in bulk (default 0.10 = 10%)
-	evictionInProgress    bool                   // Flag to prevent concurrent evictions
-	evictionThreshold     int                    // Preemptive eviction threshold (e.g., 90% of max)
-	simulationMode        bool                   // When true, log blocks but don't actually block requests
-	telemetry             *AppInsightsTelemetry  // Azure Application Insights telemetry
-	eventStream           *EventStream           // Real-time event stream
+	mu                       sync.RWMutex
+	ipTrackers               map[string]*IPTracker  // In-memory for active tracking
+	blockedCache             map[string]time.Time   // In-memory cache of blocked IPs (IP -> expiry time)
+	storage                  storage.Storage                 // Redis or memory for blocked IPs
+	analysisThreshold        int
+	blockDuration            time.Duration
+	suspiciousPatterns       []*regexp.Regexp
+	whitelistPatterns        []*regexp.Regexp       // Static asset patterns to exclude from analysis
+	pathTraversalPatterns    []*regexp.Regexp       // Path traversal patterns (checked on all requests)
+	excessiveNestingPatterns []*regexp.Regexp       // Excessive nesting patterns (immediate block on first occurrence)
+	analysisChan             chan string
+	totalRequests            int64
+	blockedRequests          int64
+	whitelistedRequests      int64                  // Counter for whitelisted static asset requests
+	pathTraversalBlocks      int64                  // Counter for blocks due to path traversal
+	excessiveNestingBlocks   int64                  // Counter for blocks due to excessive URL-encoded nesting
+	suspiciousBlocks         int64                  // Counter for blocks due to suspicious patterns
+	maxTrackedIPs            int                    // Maximum number of IPs to track simultaneously
+	droppedIPs               int64                  // Counter for IPs dropped due to memory limits
+	evictionBatchPct         float64                // Percentage of IPs to evict in bulk (default 0.10 = 10%)
+	evictionInProgress       bool                   // Flag to prevent concurrent evictions
+	evictionThreshold        int                    // Preemptive eviction threshold (e.g., 90% of max)
+	simulationMode           bool                   // When true, log blocks but don't actually block requests
+	telemetry                *AppInsightsTelemetry  // Azure Application Insights telemetry
+	eventStream              *EventStream           // Real-time event stream
 }
 
 func NewDefender(opts DefenderOptions) *Defender {
@@ -123,6 +125,17 @@ func NewDefender(opts DefenderOptions) *Defender {
 		}
 	}
 
+	// Initialize excessive nesting patterns (immediate block on first occurrence)
+	excessiveNestingPatterns := []string{
+		`[?&](returnUrl|redirect|return|url|next|dest|destination|continue|view|target|redir).*%25[23]`,  // Excessive URL-encoded nesting (4+ levels)
+	}
+
+	for _, pattern := range excessiveNestingPatterns {
+		if re, err := regexp.Compile(`(?i)` + pattern); err == nil {
+			d.excessiveNestingPatterns = append(d.excessiveNestingPatterns, re)
+		}
+	}
+
 	// Initialize whitelist patterns for static assets
 	whitelistPatterns := []string{
 		`^/scripts/.*\.(js|css|map)$`,              // JavaScript, CSS, source maps
@@ -157,7 +170,6 @@ func NewDefender(opts DefenderOptions) *Defender {
 		`[?&](redirect|return|url|next|dest|destination|continue|view|target|redir|r|u)=https?://`,  // Open redirect
 		`[?&](redirect|return|url|next|dest|destination|continue|view|target|redir|r|u)=//`,         // Protocol-relative redirect
 		`[?&](redirect|return|url|next|dest|destination|continue|view|target|redir|r|u)=.*%2f%2f`,   // Encoded // in redirect
-		`[?&](returnUrl|redirect|return|url|next|dest|destination|continue|view|target|redir).*%25[23]`,  // Excessive URL-encoded nesting (4+ levels)
 	}
 
 	for _, pattern := range patterns {
@@ -306,10 +318,16 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 
 	requestCount := len(tracker.RequestLogs)
 	d.totalRequests++
+	
+	// Check for excessive URL-encoded nesting (be unforgiving - trigger analysis after just 1 occurrence)
+	hasExcessiveNesting := d.hasExcessiveNesting(uri)
 	d.mu.Unlock()
 
-	// Trigger analysis after threshold reached (asynchronously)
-	if requestCount >= d.analysisThreshold && tracker.AnalysisCount == 0 {
+	// Trigger analysis:
+	// - Immediately if excessive nesting detected and we have at least 1 request (first one allowed for analysis)
+	// - Or after normal threshold reached for other patterns (asynchronously)
+	if (hasExcessiveNesting && requestCount >= 1 && tracker.AnalysisCount == 0) || 
+	   (requestCount >= d.analysisThreshold && tracker.AnalysisCount == 0) {
 		select {
 		case d.analysisChan <- ip:
 		default:
@@ -343,6 +361,7 @@ func (d *Defender) analyzeIP(ip string) {
 	var suspiciousURI string
 	var reason string
 	isPathTraversal := false
+	isExcessiveNesting := false
 	
 	// Check ALL requests (including whitelisted) for path traversal
 	for _, reqLog := range tracker.RequestLogs {
@@ -352,6 +371,19 @@ func (d *Defender) analyzeIP(ip string) {
 			reason = "Path traversal attempt detected"
 			isPathTraversal = true
 			break
+		}
+	}
+	
+	// Check for excessive URL-encoded nesting (unforgiving - checked immediately)
+	if !suspicious {
+		for _, reqLog := range tracker.RequestLogs {
+			if d.hasExcessiveNesting(reqLog.URI) {
+				suspicious = true
+				suspiciousURI = reqLog.URI
+				reason = "Excessive URL-encoded nesting detected"
+				isExcessiveNesting = true
+				break
+			}
 		}
 	}
 	
@@ -406,6 +438,8 @@ func (d *Defender) analyzeIP(ip string) {
 		// Update block metrics
 		if isPathTraversal {
 			d.pathTraversalBlocks++
+		} else if isExcessiveNesting {
+			d.excessiveNestingBlocks++
 		} else {
 			d.suspiciousBlocks++
 		}
@@ -480,6 +514,16 @@ func (d *Defender) isWhitelisted(uri string) bool {
 // hasPathTraversal checks if a URI contains path traversal attempts
 func (d *Defender) hasPathTraversal(uri string) bool {
 	for _, pattern := range d.pathTraversalPatterns {
+		if pattern.MatchString(uri) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasExcessiveNesting checks if a URI contains excessive URL-encoded nesting
+func (d *Defender) hasExcessiveNesting(uri string) bool {
+	for _, pattern := range d.excessiveNestingPatterns {
 		if pattern.MatchString(uri) {
 			return true
 		}

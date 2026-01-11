@@ -184,12 +184,6 @@ func TestDefender_IsSuspicious(t *testing.T) {
 		{"/script.php", true},
 		{"/.git/config", true},
 		{"/api/data", false},
-		// Excessive URL-encoded nesting tests
-		{"/cuenta/crear?returnUrl=/cuenta/crear?returnUrl%3D/cuenta/ingresar?returnUrl%253D/cuenta/crear?returnUrl%25253D/productos", true},
-		{"/login?returnUrl=/dashboard?returnUrl%3D/home?returnUrl%253D/account?returnUrl%25253D/settings", true},
-		{"/auth?redirect=/page1?redirect%3D/page2?redirect%253D/page3", true},
-		{"/simple?returnUrl=/dashboard", false}, // Single level is ok
-		{"/double?returnUrl=/page?returnUrl%3D/target", false}, // Two levels is ok
 	}
 
 	for _, tt := range tests {
@@ -1072,7 +1066,7 @@ func TestDefender_ExcessiveURLEncodedNesting(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := defender.isSuspicious(tt.uri)
+			result := defender.hasExcessiveNesting(tt.uri)
 			if result != tt.suspicious {
 				t.Errorf("%s: expected suspicious=%v (reason: %s), got %v for URI: %s", 
 					tt.name, tt.suspicious, tt.reason, result, tt.uri)
@@ -1081,3 +1075,46 @@ func TestDefender_ExcessiveURLEncodedNesting(t *testing.T) {
 	}
 }
 
+
+func TestDefender_ExcessiveNesting_UnforgivingBehavior(t *testing.T) {
+store := storage.NewMemoryStorage(60 * time.Minute)
+defender := NewDefender(DefenderOptions{
+AnalysisThreshold:    5,  // Normal threshold is 5
+BlockDuration:        60 * time.Minute,
+Storage:              store,
+MaxTrackedIPs:        10000,
+EvictionBatchPct:     0.10,
+EvictionThresholdPct: 0.93,
+SimulationMode:       false,
+})
+
+ip := "192.168.1.200"
+excessiveNestingURI := "/cuenta/crear?returnUrl=/cuenta/crear?returnUrl%3D/cuenta/ingresar?returnUrl%253D/cuenta/crear?returnUrl%25253D/productos"
+
+// First request with excessive nesting - should be ALLOWED (for deferred analysis)
+req1 := httptest.NewRequest("GET", "/check", nil)
+req1.Header.Set("X-Real-IP", ip)
+req1.Header.Set("X-Original-URI", excessiveNestingURI)
+w1 := httptest.NewRecorder()
+defender.CheckRequest(w1, req1)
+
+if w1.Code != http.StatusOK {
+t.Errorf("First request should be allowed (for analysis), got %d", w1.Code)
+}
+
+// Wait for analysis to complete
+time.Sleep(200 * time.Millisecond)
+
+// Second request - should be BLOCKED (unforgiving behavior)
+req2 := httptest.NewRequest("GET", "/check", nil)
+req2.Header.Set("X-Real-IP", ip)
+req2.Header.Set("X-Original-URI", "/any-path")
+w2 := httptest.NewRecorder()
+defender.CheckRequest(w2, req2)
+
+if w2.Code != http.StatusNotFound {
+t.Errorf("Second request should be blocked (unforgiving), got %d, expected 404", w2.Code)
+}
+
+t.Logf("✓ Unforgiving behavior verified: First request allowed, second request blocked")
+}
