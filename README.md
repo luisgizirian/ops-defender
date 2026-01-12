@@ -32,13 +32,16 @@ The service analyzes incoming requests asynchronously, tracks suspicious pattern
 - **Thread-safe IP tracking** with automatic cleanup
 - **RESTful API** for Nginx auth_request integration
 - **Pattern detection** for common attacks:
-  - Path traversal
+  - Path traversal (checked on all requests)
   - SQL injection
   - XSS (Cross-Site Scripting)
   - WordPress exploits
   - Open redirect attacks
+  - **Excessive URL-encoded nesting (4+ levels) - IMMEDIATE BLOCKING** ⚡
   - Code injection attempts
   - Sensitive file access (.env, .git, etc.)
+- **Immediate blocking** for unforgiving attacks (nesting) - first request blocked
+- **Deferred analysis** for other patterns - ~5 requests before blocking
 - **Automated reporting** (daily and weekly)
 - **Email notifications** (optional)
 
@@ -47,13 +50,17 @@ The service analyzes incoming requests asynchronously, tracks suspicious pattern
 **HTTP-Based Request Flow:**
 
 1. **Proxy forwards request** to Ops Defender `/check` endpoint (via HTTP)
-2. **First ~5 requests** from any IP are **allowed through** (return 200 OK)
-3. Requests are **logged asynchronously** to memory
-4. Background worker **analyzes patterns offline**
-5. If suspicious patterns detected, IP is **marked as blocked**
-6. **Subsequent requests** from blocked IPs return **403 Forbidden**
-7. **Proxy blocks request** based on 403 response
-8. **Zero performance impact** on request processing - analysis happens in background
+2. **Immediate check** for unforgiving patterns (excessive nesting):
+   - **First malicious request** → blocked immediately (HTTP 403/404)
+   - Prevents backend from processing dangerous URLs
+3. **Deferred analysis** for other patterns:
+   - **First ~5 requests** from any IP are **allowed through** (return 200 OK)
+   - Requests are **logged asynchronously** to memory
+   - Background worker **analyzes patterns offline**
+   - If suspicious patterns detected, IP is **marked as blocked**
+4. **Subsequent requests** from blocked IPs return **403 Forbidden**
+5. **Proxy blocks request** based on 403 response
+6. **Zero performance impact** on request processing - analysis happens in background
 
 This HTTP-based validation approach works with any proxy that can make authorization decisions based on HTTP status codes.
 
@@ -313,6 +320,10 @@ Ops Defender uses a standard HTTP API (`/check` endpoint) for request validation
 
 ### Nginx Integration
 
+**Critical Requirements:**
+- Ops Defender returns **HTTP 403 Forbidden** for blocked IPs
+- `error_page 403` directive **must** be at same scope level as `auth_request` to intercept blocks
+
 Add to your Nginx server block:
 
 ```nginx
@@ -323,18 +334,28 @@ server {
     # Ops Defender auth check
     auth_request /auth;
     
+    # CRITICAL: Intercept 403 responses at same level as auth_request
+    # Without this, blocked requests reach backend and may cause HTTP 500
+    error_page 403 = @defender_blocked;
+    
     location = /auth {
         internal;
         proxy_pass http://localhost:8080/check;
         proxy_pass_request_body off;
         proxy_set_header Content-Length "";
-        proxy_set_header X-Original-URI $request_uri;
+        proxy_set_header X-Original-URI $request_uri;  # Path only, not full URL
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+    
+    # Handle blocked requests
+    location @defender_blocked {
+        return 403 "Access Denied - Suspicious Activity Detected\n";
     }
 
     # Your application
     location / {
+        # Only reached if /auth returns 200 (IP allowed)
         proxy_pass http://localhost:3000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -342,7 +363,9 @@ server {
 }
 ```
 
-See [nginx.conf.example](nginx.conf.example) for complete configuration.
+**Common Issue:** If `error_page 403` is placed inside `location /` instead of server level, Nginx won't intercept the 403 response and malicious requests will reach your backend.
+
+See [nginx.conf.example](nginx.conf.example) for complete configuration and [IMMEDIATE-BLOCKING.md](IMMEDIATE-BLOCKING.md) troubleshooting guide.
 
 ### Other Proxy Solutions
 
@@ -693,6 +716,7 @@ The test script validates:
 - ✓ XSS attack detection
 - ✓ WordPress exploit detection
 - ✓ Open redirect detection
+- ✓ Excessive URL-encoded nesting detection
 - ✓ Sensitive file access blocking
 - ✓ Rate limit enforcement
 - ✓ Legitimate traffic handling
@@ -748,9 +772,14 @@ curl -H "X-Real-IP: 192.168.1.102" \
      -H "X-Original-URI: /login?redirect=http://evil.com" \
      http://localhost:8080/check
 
-# 4. Rate limiting (send 10 rapid requests)
+# 4. Excessive URL-encoded nesting
+curl -H "X-Real-IP: 192.168.1.103" \
+     -H "X-Original-URI: /cuenta/crear?returnUrl=/cuenta/crear?returnUrl%3D/cuenta/ingresar?returnUrl%253D/cuenta/crear?returnUrl%25253D/productos" \
+     http://localhost:8080/check
+
+# 5. Rate limiting (send 10 rapid requests)
 for i in {1..10}; do
-  curl -H "X-Real-IP: 192.168.1.103" \
+  curl -H "X-Real-IP: 192.168.1.104" \
        -H "X-Original-URI: /api/data" \
        http://localhost:8080/check
 done

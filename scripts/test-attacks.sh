@@ -244,14 +244,21 @@ main() {
         "/shell.php" \
         "blocked"
     
-    # Test 11: Legitimate Request
+    # Test 11: Excessive URL-Encoded Nesting Attack
+    test_request \
+        "Excessive URL-Encoded Nesting Attack" \
+        "192.168.1.111" \
+        "/cuenta/crear?returnUrl=/cuenta/crear?returnUrl%3D/cuenta/ingresar?returnUrl%253D/cuenta/crear?returnUrl%25253D/productos" \
+        "blocked"
+    
+    # Test 12: Legitimate Request
     test_request \
         "Legitimate Request" \
         "192.168.1.200" \
         "/api/users" \
         "allowed"
     
-    # Test 12: Rate Limiting
+    # Test 13: Rate Limiting
     test_rate_limit \
         "Rate Limit Detection" \
         "192.168.1.110"

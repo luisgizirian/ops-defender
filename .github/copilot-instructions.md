@@ -64,10 +64,18 @@ Ops Defender uses layered caching to minimize latency and Redis calls:
 
 ### Deferred Analysis Pattern
 
-**CRITICAL:** Analysis happens asynchronously to avoid blocking legitimate traffic:
+**CRITICAL:** Analysis happens asynchronously to avoid blocking legitimate traffic. **EXCEPT for excessive nesting attacks which use immediate pre-logging blocking:**
 
 ```go
-// In CheckRequest: Log request and return 200 immediately
+// IMMEDIATE CHECK: Block excessive nesting BEFORE logging (unforgiving)
+if d.hasExcessiveNestingFast(uri) {
+    // Block immediately - first request never reaches backend
+    d.blockedCache[ip] = time.Now().Add(d.blockDuration)
+    w.WriteHeader(http.StatusForbidden)
+    return
+}
+
+// DEFERRED ANALYSIS: For other patterns, log and analyze asynchronously
 tracker.RequestLogs = append(tracker.RequestLogs, RequestLog{...})
 w.WriteHeader(http.StatusOK)  // Non-blocking response
 
@@ -80,7 +88,17 @@ if requestCount >= d.analysisThreshold {
 go d.analysisWorker()
 ```
 
-Never add blocking I/O or heavy computation to `CheckRequest()` - it must respond in microseconds.
+**Two-Tier Detection System:**
+1. **Immediate Blocking (Pre-Logging):** Excessive URL-encoded nesting attacks
+   - Checked BEFORE request logging
+   - First malicious request is blocked (prevents backend crashes)
+   - Uses optimized string matching (~150-1150ns)
+2. **Deferred Analysis (Post-Logging):** All other attack patterns
+   - Logged first, analyzed asynchronously
+   - First ~5 requests allowed through for analysis
+   - Zero performance impact on legitimate traffic
+
+Never add blocking I/O or heavy computation to `CheckRequest()` except for immediate pre-logging checks which must be highly optimized.
 
 ### Fail-Open Redis Error Handling
 
@@ -216,6 +234,37 @@ if currentCount >= d.evictionThreshold && !d.evictionInProgress {
 ```
 
 **When adding new tracking logic:** Always respect `maxTrackedIPs` limit and use bulk eviction pattern.
+
+### Immediate Blocking for Excessive Nesting (Unforgiving Mode)
+
+**IMPORTANT:** Excessive URL-encoded nesting attacks bypass the deferred analysis system and are blocked on **first detection**. See [IMMEDIATE-BLOCKING.md](../IMMEDIATE-BLOCKING.md) for full details.
+
+**Implementation:**
+```go
+// In CheckRequest() - BEFORE logging:
+if d.hasExcessiveNestingFast(uri) {
+    // Block immediately, add to cache, record async
+    d.blockedCache[ip] = time.Now().Add(d.blockDuration)
+    w.WriteHeader(http.StatusForbidden)
+    return
+}
+```
+
+**Performance:**
+- **Fast path (90% of traffic):** ~150ns (early exit if no returnUrl)
+- **Malicious request:** ~1,150ns (full pattern check + block)
+- **Cached block (subsequent):** ~200ns (Tier 1 cache hit)
+
+**Pattern Detection:**
+- Detects 4+ levels of URL-encoded nesting: `returnUrl%25253D`
+- Uses optimized string matching (not regex) for speed
+- Pre-compiled patterns: `returnUrl%3D`, `returnUrl%253D`, `returnUrl%25253D`
+
+**Why Immediate Blocking:**
+1. Prevents backend crashes (HTTP 500 errors)
+2. No "free" malicious requests for IP rotation attacks
+3. Attack pattern is unambiguous - no false positives
+4. Performance impact minimal (~150ns for legitimate traffic)
 
 ## Development Environment
 
@@ -671,8 +720,82 @@ curl http://localhost:8080/stats | jq '.active_ips'
 curl http://localhost:8080/stats | jq '.blocked_ips'
 ```
 
+## Common Integration Issues
+
+### HTTP Status Code Mismatch (404 vs 403)
+
+**Problem:** Ops Defender blocks IPs but backend still receives requests and crashes.
+
+**Diagnosis:**
+1. Check Ops Defender response: `curl -I -H "X-Real-IP: test" -H "X-Original-URI: /malicious" http://defender:8080/check`
+2. Should return **403 Forbidden**, not 404
+3. Nginx `error_page 403` won't catch 404 responses
+
+**Fix:** `handleBlockedRequest()` in `defender.go` must return `http.StatusForbidden` (403), not `http.StatusNotFound` (404).
+
+**Why This Matters:**
+- Nginx `auth_request` + `error_page 403` only intercepts 403 responses
+- 404 responses are treated as routing errors, request proceeds to backend
+- Backend receives malicious request → crashes with HTTP 500
+
+### Nginx error_page Placement
+
+**Critical Rule:** `error_page 403` must be at **same scope level** as `auth_request`.
+
+**Wrong:**
+```nginx
+server {
+    include snippets/ops-defender.conf;  # auth_request at server level
+    location / {
+        error_page 403 = @blocked;  # Location level - TOO LATE!
+        proxy_pass http://backend;
+    }
+}
+```
+
+**Correct:**
+```nginx
+server {
+    auth_request /auth;  # Server level
+    error_page 403 = @blocked;  # Server level - SAME SCOPE
+    location / {
+        proxy_pass http://backend;
+    }
+}
+```
+
+**Verification:**
+```bash
+# Check compiled config scope
+nginx -T | grep -B 5 -A 5 "error_page.*403"
+# Ensure it appears at same indentation level as auth_request
+```
+
+### Debug Logging for Pattern Matching
+
+Add temporary logging to diagnose pattern detection issues:
+
+```go
+// In CheckRequest(), after extracting URI:
+if strings.Contains(strings.ToLower(uri), "returnurl") {
+    log.Printf("DEBUG: IP=%s, URI=%s, HasNesting=%v", ip, uri, d.hasExcessiveNestingFast(uri))
+}
+```
+
+Expected output:
+```
+DEBUG: IP=1.2.3.4, URI=/cuenta/crear?returnUrl=.../returnUrl%25253D/..., HasNesting=true
+BLOCKED (immediate): IP 1.2.3.4 - excessive nesting on first request
+```
+
+If `HasNesting=false` but URI clearly has nesting, check:
+1. Nginx is sending `X-Original-URI: $request_uri` (not full URL)
+2. Pattern matching in `nestingPatterns` slice covers the encoding level
+3. URI isn't being decoded before reaching Ops Defender
+
 ## Related Documentation
 
 - [README.md](README.md) - Complete feature documentation
 - [DDOS-DEFENSE.md](DDOS-DEFENSE.md) - DDoS protection analysis, memory safety
-- [nginx.conf.example](nginx.conf.example) - Integration guide
+- [nginx.conf.example](nginx.conf.example) - Integration guide with proper error_page placement
+- [IMMEDIATE-BLOCKING.md](IMMEDIATE-BLOCKING.md) - Troubleshooting section for HTTP status and Nginx issues
