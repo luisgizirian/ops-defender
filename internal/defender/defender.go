@@ -69,7 +69,7 @@ type Defender struct {
 	pathTraversalBlocks      int64                   // Counter for blocks due to path traversal
 	excessiveNestingBlocks   int64                   // Counter for blocks due to excessive URL-encoded nesting
 	suspiciousBlocks         int64                   // Counter for blocks due to suspicious patterns
-	repeatBlockedRequests    int64                 // Counter for requests from already-blocked IPs (cached blocks)
+	repeatBlockedRequests    int64                 	 // Counter for requests from already-blocked IPs (cached blocks)
 	maxTrackedIPs            int                     // Maximum number of IPs to track simultaneously
 	droppedIPs               int64                   // Counter for IPs dropped due to memory limits
 	evictionBatchPct         float64                 // Percentage of IPs to evict in bulk (default 0.10 = 10%)
