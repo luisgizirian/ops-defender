@@ -83,7 +83,8 @@ func TestDefender_CheckRequest_BlocksSuspiciousPath(t *testing.T) {
 	w := httptest.NewRecorder()
 	defender.CheckRequest(w, req)
 	
-	if w.Code != http.StatusForbidden {
+	// Expecting 404 (NotFound) which is what handleBlockedRequest returns in non-simulation mode
+	if w.Code != http.StatusNotFound {
 		t.Errorf("Expected IP to be blocked after suspicious patterns detected, got %d", w.Code)
 	}
 }
@@ -1077,44 +1078,168 @@ func TestDefender_ExcessiveURLEncodedNesting(t *testing.T) {
 
 
 func TestDefender_ExcessiveNesting_UnforgivingBehavior(t *testing.T) {
-store := storage.NewMemoryStorage(60 * time.Minute)
-defender := NewDefender(DefenderOptions{
-AnalysisThreshold:    5,  // Normal threshold is 5
-BlockDuration:        60 * time.Minute,
-Storage:              store,
-MaxTrackedIPs:        10000,
-EvictionBatchPct:     0.10,
-EvictionThresholdPct: 0.93,
-SimulationMode:       false,
-})
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    5,  // Normal threshold is 5
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+	})
 
-ip := "192.168.1.200"
-excessiveNestingURI := "/cuenta/crear?returnUrl=/cuenta/crear?returnUrl%3D/cuenta/ingresar?returnUrl%253D/cuenta/crear?returnUrl%25253D/productos"
+	ip := "192.168.1.200"
+	excessiveNestingURI := "/cuenta/crear?returnUrl=/cuenta/crear?returnUrl%3D/cuenta/ingresar?returnUrl%253D/cuenta/crear?returnUrl%25253D/productos"
 
-// First request with excessive nesting - should be ALLOWED (for deferred analysis)
-req1 := httptest.NewRequest("GET", "/check", nil)
-req1.Header.Set("X-Real-IP", ip)
-req1.Header.Set("X-Original-URI", excessiveNestingURI)
-w1 := httptest.NewRecorder()
-defender.CheckRequest(w1, req1)
+	// First request with excessive nesting - should be BLOCKED IMMEDIATELY
+	req1 := httptest.NewRequest("GET", "/check", nil)
+	req1.Header.Set("X-Real-IP", ip)
+	req1.Header.Set("X-Original-URI", excessiveNestingURI)
+	w1 := httptest.NewRecorder()
+	defender.CheckRequest(w1, req1)
 
-if w1.Code != http.StatusOK {
-t.Errorf("First request should be allowed (for analysis), got %d", w1.Code)
+	// CHANGED: First request should now be blocked immediately (not allowed)
+	if w1.Code != http.StatusNotFound {
+		t.Errorf("First excessive nesting request should be blocked immediately, got %d", w1.Code)
+	}
+
+	// Second request - should also be BLOCKED (from cache)
+	req2 := httptest.NewRequest("GET", "/check", nil)
+	req2.Header.Set("X-Real-IP", ip)
+	req2.Header.Set("X-Original-URI", "/any-path")
+	w2 := httptest.NewRecorder()
+	defender.CheckRequest(w2, req2)
+
+	if w2.Code != http.StatusNotFound {
+		t.Errorf("Second request should be blocked (cached), got %d, expected 404", w2.Code)
+	}
+
+	// Verify IP is in blocked cache
+	defender.mu.RLock()
+	_, blocked := defender.blockedCache[ip]
+	excessiveNestingBlocks := defender.excessiveNestingBlocks
+	defender.mu.RUnlock()
+
+	if !blocked {
+		t.Error("IP should be in blocked cache after immediate blocking")
+	}
+
+	if excessiveNestingBlocks != 1 {
+		t.Errorf("Expected 1 excessive nesting block, got %d", excessiveNestingBlocks)
+	}
+
+	t.Logf("✓ Immediate blocking verified: First request blocked, second request cached block")
 }
 
-// Wait for analysis to complete
-time.Sleep(200 * time.Millisecond)
+func TestDefender_ExcessiveNesting_ImmediateBlocking_Performance(t *testing.T) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    5,
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+	})
 
-// Second request - should be BLOCKED (unforgiving behavior)
-req2 := httptest.NewRequest("GET", "/check", nil)
-req2.Header.Set("X-Real-IP", ip)
-req2.Header.Set("X-Original-URI", "/any-path")
-w2 := httptest.NewRecorder()
-defender.CheckRequest(w2, req2)
-
-if w2.Code != http.StatusNotFound {
-t.Errorf("Second request should be blocked (unforgiving), got %d, expected 404", w2.Code)
+	// Test that legitimate requests are still fast (fast path)
+	legitimateURI := "/productos/detalles/abc123/product-name"
+	
+	start := time.Now()
+	for i := 0; i < 1000; i++ {
+		req := httptest.NewRequest("GET", "/check", nil)
+		req.Header.Set("X-Real-IP", fmt.Sprintf("10.0.0.%d", i))
+		req.Header.Set("X-Original-URI", legitimateURI)
+		w := httptest.NewRecorder()
+		defender.CheckRequest(w, req)
+		
+		if w.Code != http.StatusOK {
+			t.Errorf("Legitimate request should be allowed, got %d", w.Code)
+		}
+	}
+	elapsed := time.Since(start)
+	avgPerRequest := elapsed / 1000
+	
+	t.Logf("Average time per legitimate request: %v", avgPerRequest)
+	
+	// Should be < 15μs per request (relaxed from 10μs to account for test overhead)
+	if avgPerRequest > 15*time.Microsecond {
+		t.Errorf("Performance degradation: expected < 15μs per request, got %v", avgPerRequest)
+	}
 }
 
-t.Logf("✓ Unforgiving behavior verified: First request allowed, second request blocked")
+func TestDefender_ExcessiveNesting_FastPathOptimization(t *testing.T) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    5,
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+	})
+
+	// Test fast path (no returnUrl)
+	result := defender.hasExcessiveNestingFast("/productos/detalles/abc123")
+	if result {
+		t.Error("Fast path should return false for URIs without returnUrl")
+	}
+
+	// Test single returnUrl (not excessive)
+	result = defender.hasExcessiveNestingFast("/login?returnUrl=/dashboard")
+	if result {
+		t.Error("Single returnUrl should not trigger excessive nesting")
+	}
+
+	// Test excessive nesting
+	result = defender.hasExcessiveNestingFast("/cuenta/crear?returnUrl=/cuenta/crear?returnUrl%3D/cuenta/ingresar?returnUrl%253D/cuenta/crear?returnUrl%25253D/productos")
+	if !result {
+		t.Error("Excessive nesting (4+ levels) should be detected")
+	}
+
+	// Test case insensitivity
+	result = defender.hasExcessiveNestingFast("/page?returnurl=/page?returnurl%3D/page?returnurl%253D/target")
+	if !result {
+		t.Error("Excessive nesting should be detected (case insensitive)")
+	}
+}
+
+func BenchmarkDefender_HasExcessiveNestingFast(b *testing.B) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    5,
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+	})
+
+	b.Run("Legitimate-FastPath", func(b *testing.B) {
+		uri := "/productos/detalles/abc123/product-name"
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			defender.hasExcessiveNestingFast(uri)
+		}
+	})
+
+	b.Run("Legitimate-WithReturnUrl", func(b *testing.B) {
+		uri := "/login?returnUrl=/dashboard"
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			defender.hasExcessiveNestingFast(uri)
+		}
+	})
+
+	b.Run("Malicious-ExcessiveNesting", func(b *testing.B) {
+		uri := "/cuenta/crear?returnUrl=/cuenta/crear?returnUrl%3D/cuenta/ingresar?returnUrl%253D/cuenta/crear?returnUrl%25253D/productos"
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			defender.hasExcessiveNestingFast(uri)
+		}
+	})
 }

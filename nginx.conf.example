@@ -2,33 +2,49 @@
 # 
 # Ops Defender returns:
 #   - 200 OK = Allow request to proceed
-#   - 403 Forbidden = Block request (malicious IP)
+#   - 403 Forbidden = Block request (malicious IP detected)
 #
 # Nginx auth_request behavior:
 #   - 200-299: Access allowed, continue to backend
-#   - 401/403: Access denied, return that status to client
-#   - 404+ : Treated as error, returns 500 (so we use 403 for blocks)
+#   - 401/403: Access denied, can be intercepted with error_page
+#   - Other codes: Treated as errors
+#
+# CRITICAL: Ops Defender MUST return 403 (not 404) for proper Nginx interception.
+# The error_page directive MUST be at same scope level as auth_request.
 
 server {
     listen 80;
     server_name example.com;
 
-    # Ops Defender auth check
+    # Ops Defender auth check (server level)
     auth_request /auth;
+    
+    # CRITICAL: Intercept 403 responses at same level as auth_request
+    # Without this, blocked requests reach backend and may cause HTTP 500
+    error_page 403 = @defender_blocked;
     
     location = /auth {
         internal;
         proxy_pass http://localhost:8080/check;
         proxy_pass_request_body off;
         proxy_set_header Content-Length "";
+        
+        # CRITICAL: Use $request_uri (path+query) not full URL
         proxy_set_header X-Original-URI $request_uri;
+        
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+    
+    # Handle blocked requests
+    location @defender_blocked {
+        return 403 "Access Denied - Suspicious Activity Detected\n";
     }
 
     # Your application
     location / {
         # Ops Defender will check all requests before they reach here
+        # If auth returns 403, error_page triggers and request never reaches backend
         proxy_pass http://localhost:3000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -41,3 +57,37 @@ server {
         # deny all;
     }
 }
+
+# Alternative: Using include snippet (recommended for multi-site)
+# File: /etc/nginx/snippets/ops-defender.conf
+# ---
+# auth_request /ops-auth;
+# auth_request_set $auth_status $upstream_status;
+# error_page 403 = @ops_defender_blocked;
+#
+# location = /ops-auth {
+#     internal;
+#     proxy_pass http://localhost:8080/check;
+#     proxy_pass_request_body off;
+#     proxy_set_header Content-Length "";
+#     proxy_set_header X-Original-URI $request_uri;
+#     proxy_set_header X-Real-IP $remote_addr;
+#     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+# }
+#
+# location @ops_defender_blocked {
+#     return 403 "Access Denied\n";
+# }
+# ---
+#
+# Then in your server block:
+# server {
+#     listen 443 ssl;
+#     server_name example.com;
+#     
+#     include snippets/ops-defender.conf;  # All directives at server level
+#     
+#     location / {
+#         proxy_pass http://backend;
+#     }
+# }

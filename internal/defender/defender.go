@@ -38,41 +38,42 @@ type IPTracker struct {
 
 // DefenderOptions contains configuration options for creating a new Defender
 type DefenderOptions struct {
-	AnalysisThreshold    int           // Number of requests to collect before analysis
-	BlockDuration        time.Duration // Duration to block suspicious IPs
-	Storage              storage.Storage       // Redis or memory storage for blocked IPs
-	MaxTrackedIPs        int           // Maximum number of IPs to track simultaneously
-	EvictionBatchPct     float64       // Percentage of IPs to evict in bulk (0.01-1.0, default 0.10)
-	EvictionThresholdPct float64       // Preemptive eviction threshold (0.5-1.0, default 0.93)
-	SimulationMode       bool          // When true, log blocks but don't actually block requests
+	AnalysisThreshold    int             // Number of requests to collect before analysis
+	BlockDuration        time.Duration   // Duration to block suspicious IPs
+	Storage              storage.Storage // Redis or memory storage for blocked IPs
+	MaxTrackedIPs        int             // Maximum number of IPs to track simultaneously
+	EvictionBatchPct     float64         // Percentage of IPs to evict in bulk (0.01-1.0, default 0.10)
+	EvictionThresholdPct float64         // Preemptive eviction threshold (0.5-1.0, default 0.93)
+	SimulationMode       bool            // When true, log blocks but don't actually block requests
 }
 
 type Defender struct {
 	mu                       sync.RWMutex
-	ipTrackers               map[string]*IPTracker  // In-memory for active tracking
-	blockedCache             map[string]time.Time   // In-memory cache of blocked IPs (IP -> expiry time)
-	storage                  storage.Storage                 // Redis or memory for blocked IPs
+	ipTrackers               map[string]*IPTracker // In-memory for active tracking
+	blockedCache             map[string]time.Time  // In-memory cache of blocked IPs (IP -> expiry time)
+	storage                  storage.Storage       // Redis or memory for blocked IPs
 	analysisThreshold        int
 	blockDuration            time.Duration
 	suspiciousPatterns       []*regexp.Regexp
-	whitelistPatterns        []*regexp.Regexp       // Static asset patterns to exclude from analysis
-	pathTraversalPatterns    []*regexp.Regexp       // Path traversal patterns (checked on all requests)
-	excessiveNestingPatterns []*regexp.Regexp       // Excessive nesting patterns (immediate block on first occurrence)
+	whitelistPatterns        []*regexp.Regexp // Static asset patterns to exclude from analysis
+	pathTraversalPatterns    []*regexp.Regexp // Path traversal patterns (checked on all requests)
+	excessiveNestingPatterns []*regexp.Regexp // Excessive nesting patterns (immediate block on first occurrence)
+	nestingPatterns          []string         // Pre-compiled nesting patterns for fast string matching
 	analysisChan             chan string
 	totalRequests            int64
 	blockedRequests          int64
-	whitelistedRequests      int64                  // Counter for whitelisted static asset requests
-	pathTraversalBlocks      int64                  // Counter for blocks due to path traversal
-	excessiveNestingBlocks   int64                  // Counter for blocks due to excessive URL-encoded nesting
-	suspiciousBlocks         int64                  // Counter for blocks due to suspicious patterns
-	maxTrackedIPs            int                    // Maximum number of IPs to track simultaneously
-	droppedIPs               int64                  // Counter for IPs dropped due to memory limits
-	evictionBatchPct         float64                // Percentage of IPs to evict in bulk (default 0.10 = 10%)
-	evictionInProgress       bool                   // Flag to prevent concurrent evictions
-	evictionThreshold        int                    // Preemptive eviction threshold (e.g., 90% of max)
-	simulationMode           bool                   // When true, log blocks but don't actually block requests
-	telemetry                *AppInsightsTelemetry  // Azure Application Insights telemetry
-	eventStream              *EventStream           // Real-time event stream
+	whitelistedRequests      int64                 // Counter for whitelisted static asset requests
+	pathTraversalBlocks      int64                 // Counter for blocks due to path traversal
+	excessiveNestingBlocks   int64                 // Counter for blocks due to excessive URL-encoded nesting
+	suspiciousBlocks         int64                 // Counter for blocks due to suspicious patterns
+	maxTrackedIPs            int                   // Maximum number of IPs to track simultaneously
+	droppedIPs               int64                 // Counter for IPs dropped due to memory limits
+	evictionBatchPct         float64               // Percentage of IPs to evict in bulk (default 0.10 = 10%)
+	evictionInProgress       bool                  // Flag to prevent concurrent evictions
+	evictionThreshold        int                   // Preemptive eviction threshold (e.g., 90% of max)
+	simulationMode           bool                  // When true, log blocks but don't actually block requests
+	telemetry                *AppInsightsTelemetry // Azure Application Insights telemetry
+	eventStream              *EventStream          // Real-time event stream
 }
 
 func NewDefender(opts DefenderOptions) *Defender {
@@ -81,7 +82,7 @@ func NewDefender(opts DefenderOptions) *Defender {
 		log.Printf("Invalid eviction batch percentage %.2f, using default 0.10 (10%%)", opts.EvictionBatchPct)
 		opts.EvictionBatchPct = 0.10
 	}
-	
+
 	// Validate eviction threshold percentage
 	// Default is 0.93 (93%) which provides optimal balance:
 	// - Only 7% memory overhead (better than previous 10%)
@@ -91,13 +92,13 @@ func NewDefender(opts DefenderOptions) *Defender {
 		log.Printf("Invalid eviction threshold percentage %.2f, using optimal default 0.93 (93%%)", opts.EvictionThresholdPct)
 		opts.EvictionThresholdPct = 0.93
 	}
-	
+
 	// Calculate preemptive eviction threshold based on configured percentage
 	evictionThreshold := int(float64(opts.MaxTrackedIPs) * opts.EvictionThresholdPct)
 	if evictionThreshold < 1 {
 		evictionThreshold = 1
 	}
-	
+
 	d := &Defender{
 		ipTrackers:         make(map[string]*IPTracker),
 		blockedCache:       make(map[string]time.Time),
@@ -115,8 +116,8 @@ func NewDefender(opts DefenderOptions) *Defender {
 
 	// Initialize path traversal patterns (checked on ALL requests including whitelisted)
 	pathTraversalPatterns := []string{
-		`\.\.\/`,     // Path traversal forward slash
-		`\.\.\\`,     // Path traversal backslash
+		`\.\.\/`, // Path traversal forward slash
+		`\.\.\\`, // Path traversal backslash
 	}
 
 	for _, pattern := range pathTraversalPatterns {
@@ -127,7 +128,7 @@ func NewDefender(opts DefenderOptions) *Defender {
 
 	// Initialize excessive nesting patterns (immediate block on first occurrence)
 	excessiveNestingPatterns := []string{
-		`[?&](returnUrl|redirect|return|url|next|dest|destination|continue|view|target|redir).*%25[23]`,  // Excessive URL-encoded nesting (4+ levels)
+		`[?&](returnUrl|redirect|return|url|next|dest|destination|continue|view|target|redir).*%25[23]`, // Excessive URL-encoded nesting (4+ levels)
 	}
 
 	for _, pattern := range excessiveNestingPatterns {
@@ -136,13 +137,23 @@ func NewDefender(opts DefenderOptions) *Defender {
 		}
 	}
 
+	// Pre-compile nesting patterns for fast string matching (used in immediate check)
+	d.nestingPatterns = []string{
+		"returnUrl%3D",
+		"returnUrl%253D",
+		"returnUrl%25253D",
+		"returnurl%3D",
+		"returnurl%253D",
+		"returnurl%25253D",
+	}
+
 	// Initialize whitelist patterns for static assets
 	whitelistPatterns := []string{
-		`^/scripts/.*\.(js|css|map)$`,              // JavaScript, CSS, source maps
+		`^/scripts/.*\.(js|css|map)$`,                   // JavaScript, CSS, source maps
 		`^/images/.*\.(jpg|jpeg|png|gif|svg|webp|ico)$`, // Images
-		`^/lib/.*\.(js|css|map)$`,                  // Library files
-		`^/css/.*\.css$`,                           // Stylesheets
-		`^/fonts/.*\.(woff|woff2|ttf|eot|otf)$`,    // Fonts
+		`^/lib/.*\.(js|css|map)$`,                       // Library files
+		`^/css/.*\.css$`,                                // Stylesheets
+		`^/fonts/.*\.(woff|woff2|ttf|eot|otf)$`,         // Fonts
 		`^/assets/.*\.(js|css|png|jpg|svg|woff|woff2)$`, // Generic assets
 	}
 
@@ -154,22 +165,22 @@ func NewDefender(opts DefenderOptions) *Defender {
 
 	// Initialize suspicious patterns (checked only on non-whitelisted requests)
 	patterns := []string{
-		`\/wp-admin`,                // WordPress admin
-		`\/wp-login`,                // WordPress login
-		`\/phpmyadmin`,              // phpMyAdmin
-		`\.php$`,                    // PHP files
-		`\.env$`,                    // Environment files
-		`\/\.git`,                   // Git directory
-		`\/admin`,                   // Generic admin
-		`eval\(`,                    // Code injection
-		`<script`,                   // XSS attempts
-		`UNION.*SELECT`,             // SQL injection
-		`;\s*DROP\s+TABLE`,          // SQL injection
-		`/config`,                   // Config files
-		`/backup`,                   // Backup files
-		`[?&](redirect|return|url|next|dest|destination|continue|view|target|redir|r|u)=https?://`,  // Open redirect
-		`[?&](redirect|return|url|next|dest|destination|continue|view|target|redir|r|u)=//`,         // Protocol-relative redirect
-		`[?&](redirect|return|url|next|dest|destination|continue|view|target|redir|r|u)=.*%2f%2f`,   // Encoded // in redirect
+		`\/wp-admin`,       // WordPress admin
+		`\/wp-login`,       // WordPress login
+		`\/phpmyadmin`,     // phpMyAdmin
+		`\.php$`,           // PHP files
+		`\.env$`,           // Environment files
+		`\/\.git`,          // Git directory
+		`\/admin`,          // Generic admin
+		`eval\(`,           // Code injection
+		`<script`,          // XSS attempts
+		`UNION.*SELECT`,    // SQL injection
+		`;\s*DROP\s+TABLE`, // SQL injection
+		`/config`,          // Config files
+		`/backup`,          // Backup files
+		`[?&](redirect|return|url|next|dest|destination|continue|view|target|redir|r|u)=https?://`, // Open redirect
+		`[?&](redirect|return|url|next|dest|destination|continue|view|target|redir|r|u)=//`,        // Protocol-relative redirect
+		`[?&](redirect|return|url|next|dest|destination|continue|view|target|redir|r|u)=.*%2f%2f`,  // Encoded // in redirect
 	}
 
 	for _, pattern := range patterns {
@@ -186,13 +197,13 @@ func NewDefender(opts DefenderOptions) *Defender {
 }
 
 // handleBlockedRequest handles the response for a blocked IP
-// In simulation mode, logs and returns 200; in normal mode, returns 404
+// In simulation mode, logs and returns 200; in normal mode, returns 403
 func (d *Defender) handleBlockedRequest(w http.ResponseWriter, ip, uri, source string) {
 	if d.simulationMode {
 		log.Printf("[SIMULATION] Would block IP %s (blocked in %s), but allowing request: %s", ip, source, uri)
 		w.WriteHeader(http.StatusOK)
 	} else {
-		w.WriteHeader(http.StatusNotFound)
+		w.WriteHeader(http.StatusForbidden) // Changed from 404 to 403 for Nginx compatibility
 	}
 }
 
@@ -205,6 +216,70 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	userAgent := r.Header.Get("User-Agent")
 
+	// DEBUG: Log URIs with returnUrl to diagnose pattern matching
+	if strings.Contains(strings.ToLower(uri), "returnurl") {
+		log.Printf("DEBUG: IP=%s, URI=%s, HasNesting=%v", ip, uri, d.hasExcessiveNestingFast(uri))
+	}
+
+	// IMMEDIATE CHECK: Block excessive nesting BEFORE logging (unforgiving)
+	// This prevents the first malicious request from reaching the backend
+	if d.hasExcessiveNestingFast(uri) {
+		// Check if already blocked (avoid duplicate blocking)
+		d.mu.RLock()
+		if expiresAt, blocked := d.blockedCache[ip]; blocked && time.Now().Before(expiresAt) {
+			d.mu.RUnlock()
+			d.mu.Lock()
+			d.blockedRequests++
+			d.mu.Unlock()
+			d.handleBlockedRequest(w, ip, uri, "cache-nesting")
+			return
+		}
+		d.mu.RUnlock()
+
+		// First detection - block immediately
+		expiresAt := time.Now().Add(d.blockDuration)
+		d.mu.Lock()
+		d.blockedCache[ip] = expiresAt
+		d.excessiveNestingBlocks++
+		d.blockedRequests++
+		d.mu.Unlock()
+
+		// Record in storage (async to avoid blocking response)
+		go func() {
+			ctx := context.Background()
+			reason := "Excessive URL-encoded nesting detected (immediate block)"
+			if err := d.storage.BlockIP(ctx, ip, reason, d.blockDuration); err != nil {
+				log.Printf("Failed to store blocked IP in storage: %v", err)
+			}
+
+			// Record block event for reporting
+			event := storage.BlockEvent{
+				IP:            ip,
+				BlockedAt:     time.Now(),
+				Reason:        reason,
+				SuspiciousURI: uri,
+				RequestCount:  1, // First request
+			}
+			if err := d.storage.RecordBlockEvent(ctx, event); err != nil {
+				log.Printf("Failed to record block event: %v", err)
+			}
+
+			// Send telemetry to Application Insights
+			if d.telemetry != nil {
+				d.telemetry.TrackBlockEvent(ip, reason, uri, 1)
+			}
+
+			// Broadcast to real-time event stream
+			if d.eventStream != nil {
+				d.eventStream.BroadcastBlockEvent(ip, reason, uri)
+			}
+		}()
+
+		d.handleBlockedRequest(w, ip, uri, "immediate-nesting")
+		log.Printf("BLOCKED (immediate): IP %s - excessive nesting on first request: %s", ip, uri)
+		return
+	}
+
 	// Fast path 1: Check in-memory blocked cache first (no I/O)
 	d.mu.RLock()
 	if expiresAt, blocked := d.blockedCache[ip]; blocked {
@@ -214,7 +289,7 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 			d.mu.Lock()
 			d.blockedRequests++
 			d.mu.Unlock()
-			
+
 			d.handleBlockedRequest(w, ip, uri, "cache")
 			return
 		}
@@ -231,23 +306,23 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 	d.mu.RLock()
 	tracker, exists := d.ipTrackers[ip]
 	d.mu.RUnlock()
-	
+
 	// Slow path: If not in memory, check Redis (only if IP is unknown)
 	if !exists {
 		blocked, err := d.storage.IsBlocked(ctx, ip)
 		if err != nil {
 			// Fail-open: On Redis error, allow request through (don't block)
 			log.Printf("WARNING: Redis error checking block status for %s, allowing request: %v", ip, err)
-			blocked = false  // Explicitly set to false to allow request
+			blocked = false // Explicitly set to false to allow request
 		}
-		
+
 		if blocked {
 			// Add to cache for next time
 			d.mu.Lock()
 			d.blockedCache[ip] = time.Now().Add(d.blockDuration)
 			d.blockedRequests++
 			d.mu.Unlock()
-			
+
 			d.handleBlockedRequest(w, ip, uri, "storage")
 			return
 		}
@@ -257,24 +332,24 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 	d.mu.Lock()
 	if !exists {
 		currentCount := len(d.ipTrackers)
-		
+
 		// Preemptive eviction: trigger at 90% capacity to avoid hitting hard limit
 		// Also check if eviction is not already in progress to prevent race condition
 		if currentCount >= d.evictionThreshold && !d.evictionInProgress {
 			// Mark eviction as in progress to prevent concurrent evictions
 			d.evictionInProgress = true
-			
+
 			// Trigger bulk eviction asynchronously
 			go func() {
 				d.evictBulkIPsSync()
-				
+
 				// Clear the in-progress flag after eviction completes
 				d.mu.Lock()
 				d.evictionInProgress = false
 				d.mu.Unlock()
 			}()
 		}
-		
+
 		// If we've hit hard limit and eviction is in progress, wait briefly
 		if currentCount >= d.maxTrackedIPs {
 			if d.evictionInProgress {
@@ -282,7 +357,7 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 				d.mu.Unlock()
 				time.Sleep(10 * time.Millisecond) // Short wait for eviction
 				d.mu.Lock()
-				
+
 				// Recheck after waiting
 				if len(d.ipTrackers) >= d.maxTrackedIPs {
 					// Still at limit - proceed anyway to avoid blocking too long
@@ -294,7 +369,7 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 				log.Printf("Hard limit reached without active eviction, system may exceed limit temporarily")
 			}
 		}
-		
+
 		tracker = &IPTracker{
 			RequestLogs: []RequestLog{},
 			Blocked:     false,
@@ -320,15 +395,15 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 	analysisCount := tracker.AnalysisCount
 	d.totalRequests++
 	d.mu.Unlock()
-	
+
 	// Check for excessive URL-encoded nesting outside critical section (regex matching can be expensive)
 	hasExcessiveNesting := d.hasExcessiveNesting(uri)
 
 	// Trigger analysis:
 	// - Immediately if excessive nesting detected and we have at least 1 request (first one allowed for analysis)
 	// - Or after normal threshold reached for other patterns (asynchronously)
-	if (hasExcessiveNesting && requestCount >= 1 && analysisCount == 0) || 
-	   (requestCount >= d.analysisThreshold && analysisCount == 0) {
+	if (hasExcessiveNesting && requestCount >= 1 && analysisCount == 0) ||
+		(requestCount >= d.analysisThreshold && analysisCount == 0) {
 		select {
 		case d.analysisChan <- ip:
 		default:
@@ -356,14 +431,14 @@ func (d *Defender) analyzeIP(ip string) {
 
 	// Mark as analyzed
 	tracker.AnalysisCount++
-	
+
 	// Analyze request patterns with whitelist separation
 	suspicious := false
 	var suspiciousURI string
 	var reason string
 	isPathTraversal := false
 	isExcessiveNesting := false
-	
+
 	// Check ALL requests (including whitelisted) for path traversal
 	for _, reqLog := range tracker.RequestLogs {
 		if d.hasPathTraversal(reqLog.URI) {
@@ -374,7 +449,7 @@ func (d *Defender) analyzeIP(ip string) {
 			break
 		}
 	}
-	
+
 	// Check for excessive URL-encoded nesting (unforgiving - checked immediately)
 	if !suspicious {
 		for _, reqLog := range tracker.RequestLogs {
@@ -387,7 +462,7 @@ func (d *Defender) analyzeIP(ip string) {
 			}
 		}
 	}
-	
+
 	// Check only non-whitelisted requests for other suspicious patterns
 	if !suspicious {
 		for _, reqLog := range tracker.RequestLogs {
@@ -405,7 +480,7 @@ func (d *Defender) analyzeIP(ip string) {
 		// Count only non-whitelisted requests for rate limiting
 		nonWhitelistedCount := 0
 		var firstNonWhitelisted, lastNonWhitelisted time.Time
-		
+
 		for _, reqLog := range tracker.RequestLogs {
 			if !reqLog.IsWhitelisted {
 				if nonWhitelistedCount == 0 {
@@ -415,16 +490,16 @@ func (d *Defender) analyzeIP(ip string) {
 				nonWhitelistedCount++
 			}
 		}
-		
+
 		// Only check rate limit if we have enough non-whitelisted requests
 		if nonWhitelistedCount >= d.analysisThreshold {
 			duration := lastNonWhitelisted.Sub(firstNonWhitelisted)
-			
+
 			// If threshold requests in less than 10 seconds, suspicious
 			if duration < 10*time.Second {
 				suspicious = true
 				reason = "High request rate"
-				log.Printf("High request rate detected for %s: %d non-whitelisted requests in %.2f seconds", 
+				log.Printf("High request rate detected for %s: %d non-whitelisted requests in %.2f seconds",
 					ip, nonWhitelistedCount, duration.Seconds())
 			}
 		}
@@ -435,7 +510,7 @@ func (d *Defender) analyzeIP(ip string) {
 		tracker.BlockedAt = time.Now()
 		expiresAt := time.Now().Add(d.blockDuration)
 		requestCount := len(tracker.RequestLogs)
-		
+
 		// Update block metrics
 		if isPathTraversal {
 			d.pathTraversalBlocks++
@@ -445,18 +520,18 @@ func (d *Defender) analyzeIP(ip string) {
 			d.suspiciousBlocks++
 		}
 		d.mu.Unlock()
-		
+
 		// Add to in-memory cache immediately
 		d.mu.Lock()
 		d.blockedCache[ip] = expiresAt
 		d.mu.Unlock()
-		
+
 		// Store in Redis/persistent storage (async)
 		ctx := context.Background()
 		if err := d.storage.BlockIP(ctx, ip, reason, d.blockDuration); err != nil {
 			log.Printf("Failed to store blocked IP in storage: %v", err)
 		}
-		
+
 		// Record block event for reporting
 		event := storage.BlockEvent{
 			IP:            ip,
@@ -465,31 +540,31 @@ func (d *Defender) analyzeIP(ip string) {
 			SuspiciousURI: suspiciousURI,
 			RequestCount:  requestCount,
 		}
-		
+
 		if err := d.storage.RecordBlockEvent(ctx, event); err != nil {
 			log.Printf("Failed to record block event: %v", err)
 		}
-		
+
 		// Send telemetry to Application Insights
 		if d.telemetry != nil {
 			d.telemetry.TrackBlockEvent(ip, reason, suspiciousURI, requestCount)
 		}
-		
+
 		// Broadcast to real-time event stream
 		if d.eventStream != nil {
 			d.eventStream.BroadcastBlockEvent(ip, reason, suspiciousURI)
 		}
-		
+
 		if d.simulationMode {
-			log.Printf("[SIMULATION] IP would be blocked: %s (reason: %s, pattern: %s, expires: %v) - but allowing all requests in simulation mode", 
+			log.Printf("[SIMULATION] IP would be blocked: %s (reason: %s, pattern: %s, expires: %v) - but allowing all requests in simulation mode",
 				ip, reason, suspiciousURI, expiresAt.Format(time.RFC3339))
 		} else {
-			log.Printf("IP marked as suspicious and blocked: %s (reason: %s, pattern: %s, expires: %v)", 
+			log.Printf("IP marked as suspicious and blocked: %s (reason: %s, pattern: %s, expires: %v)",
 				ip, reason, suspiciousURI, expiresAt.Format(time.RFC3339))
 		}
 		return
 	}
-	
+
 	d.mu.Unlock()
 }
 
@@ -522,7 +597,7 @@ func (d *Defender) hasPathTraversal(uri string) bool {
 	return false
 }
 
-// hasExcessiveNesting checks if a URI contains excessive URL-encoded nesting
+// hasExcessiveNesting checks if a URI contains excessive URL-encoded nesting (using regex)
 func (d *Defender) hasExcessiveNesting(uri string) bool {
 	for _, pattern := range d.excessiveNestingPatterns {
 		if pattern.MatchString(uri) {
@@ -532,12 +607,37 @@ func (d *Defender) hasExcessiveNesting(uri string) bool {
 	return false
 }
 
+// hasExcessiveNestingFast performs optimized string-based check for excessive nesting
+// Used in immediate pre-logging check for maximum performance
+// Fast path: Early exit if no returnUrl at all (~150ns for 90% of traffic)
+func (d *Defender) hasExcessiveNestingFast(uri string) bool {
+	// Fast path: Early exit if no returnUrl/returnurl at all
+	if !strings.Contains(uri, "returnUrl") && !strings.Contains(uri, "returnurl") {
+		return false
+	}
+
+	// Count occurrences (case-sensitive is fine, attackers use exact pattern)
+	returnURLCount := strings.Count(uri, "returnUrl") + strings.Count(uri, "returnurl")
+	if returnURLCount <= 1 {
+		return false
+	}
+
+	// Check for encoded nesting (pre-compiled patterns)
+	for _, pattern := range d.nestingPatterns {
+		if strings.Contains(uri, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (d *Defender) extractIP(r *http.Request) string {
 	// Check X-Real-IP header (set by Nginx)
 	if ip := r.Header.Get("X-Real-IP"); ip != "" {
 		return ip
 	}
-	
+
 	// Check X-Forwarded-For header
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		ips := strings.Split(xff, ",")
@@ -545,13 +645,13 @@ func (d *Defender) extractIP(r *http.Request) string {
 			return strings.TrimSpace(ips[0])
 		}
 	}
-	
+
 	// Fallback to remote address
 	parts := strings.Split(r.RemoteAddr, ":")
 	if len(parts) > 0 {
 		return parts[0]
 	}
-	
+
 	return r.RemoteAddr
 }
 
@@ -563,22 +663,22 @@ func (d *Defender) evictBulkIPsSync() {
 			log.Printf("Panic during bulk eviction: %v", r)
 		}
 	}()
-	
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	
+
 	// Calculate how many IPs to evict (default 10% of max)
 	evictionCount := int(float64(d.maxTrackedIPs) * d.evictionBatchPct)
 	if evictionCount < 1 {
 		evictionCount = 1 // Evict at least 1 IP
 	}
-	
+
 	// Collect all IPs with their last request time for LRU sorting
 	type ipWithTime struct {
 		ip       string
 		lastSeen time.Time
 	}
-	
+
 	ipsToSort := make([]ipWithTime, 0, len(d.ipTrackers))
 	for ip, tracker := range d.ipTrackers {
 		if len(tracker.RequestLogs) == 0 {
@@ -589,17 +689,17 @@ func (d *Defender) evictBulkIPsSync() {
 			ipsToSort = append(ipsToSort, ipWithTime{ip: ip, lastSeen: lastReq})
 		}
 	}
-	
+
 	// Sort by last seen time (oldest first)
 	sort.Slice(ipsToSort, func(i, j int) bool {
 		return ipsToSort[i].lastSeen.Before(ipsToSort[j].lastSeen)
 	})
-	
+
 	// Limit eviction count to actual number of IPs
 	if evictionCount > len(ipsToSort) {
 		evictionCount = len(ipsToSort)
 	}
-	
+
 	// Evict the oldest IPs
 	evictedCount := 0
 	currentCount := len(d.ipTrackers)
@@ -610,12 +710,12 @@ func (d *Defender) evictBulkIPsSync() {
 			evictedCount++
 		}
 	}
-	
+
 	if evictedCount > 0 {
 		d.droppedIPs += int64(evictedCount)
 		newCount := len(d.ipTrackers)
 		preemptive := currentCount < d.maxTrackedIPs
-		log.Printf("Bulk eviction completed: removed %d IPs (%.1f%% of max=%d), count: %d -> %d [%s]", 
+		log.Printf("Bulk eviction completed: removed %d IPs (%.1f%% of max=%d), count: %d -> %d [%s]",
 			evictedCount, d.evictionBatchPct*100, d.maxTrackedIPs, currentCount, newCount,
 			map[bool]string{true: "preemptive", false: "at-limit"}[preemptive])
 	}
@@ -634,16 +734,16 @@ func (d *Defender) evictOldestIP() {
 	var oldestIP string
 	var oldestTime time.Time
 	first := true
-	
+
 	for ip, tracker := range d.ipTrackers {
 		if len(tracker.RequestLogs) == 0 {
 			// Empty tracker, evict immediately
 			delete(d.ipTrackers, ip)
-			log.Printf("Memory limit reached (%d IPs), evicted IP with empty tracker: %s", 
+			log.Printf("Memory limit reached (%d IPs), evicted IP with empty tracker: %s",
 				d.maxTrackedIPs, ip)
 			return
 		}
-		
+
 		lastReq := tracker.RequestLogs[len(tracker.RequestLogs)-1].Timestamp
 		if first || lastReq.Before(oldestTime) {
 			oldestTime = lastReq
@@ -651,10 +751,10 @@ func (d *Defender) evictOldestIP() {
 			first = false
 		}
 	}
-	
+
 	if oldestIP != "" {
 		delete(d.ipTrackers, oldestIP)
-		log.Printf("Memory limit reached (%d IPs), evicted oldest IP: %s (last seen: %v)", 
+		log.Printf("Memory limit reached (%d IPs), evicted oldest IP: %s (last seen: %v)",
 			d.maxTrackedIPs, oldestIP, oldestTime.Format(time.RFC3339))
 	}
 }
@@ -666,21 +766,21 @@ func (d *Defender) cleanupExpired() {
 	for range ticker.C {
 		d.mu.Lock()
 		now := time.Now()
-		
+
 		// Clean up in-memory blocked cache
 		for ip, expiresAt := range d.blockedCache {
 			if now.After(expiresAt) {
 				delete(d.blockedCache, ip)
 			}
 		}
-		
+
 		// Clean up active trackers
 		for ip, tracker := range d.ipTrackers {
 			// Remove old request logs (keep only last 100)
 			if len(tracker.RequestLogs) > 100 {
 				tracker.RequestLogs = tracker.RequestLogs[len(tracker.RequestLogs)-100:]
 			}
-			
+
 			// Remove IPs from memory after 1 hour of inactivity
 			if len(tracker.RequestLogs) > 0 {
 				lastReq := tracker.RequestLogs[len(tracker.RequestLogs)-1].Timestamp
@@ -689,18 +789,18 @@ func (d *Defender) cleanupExpired() {
 				}
 			}
 		}
-		
+
 		inMemory := len(d.ipTrackers)
 		cachedBlocked := len(d.blockedCache)
 		d.mu.Unlock()
-		
+
 		// Get blocked IPs count from storage
 		ctx := context.Background()
 		blockedIPs, err := d.storage.GetBlockedIPs(ctx)
 		if err != nil {
 			log.Printf("Cleanup completed: %d active IPs, %d cached blocked IPs", inMemory, cachedBlocked)
 		} else {
-			log.Printf("Cleanup completed: %d active IPs, %d cached blocked, %d total in storage", 
+			log.Printf("Cleanup completed: %d active IPs, %d cached blocked, %d total in storage",
 				inMemory, cachedBlocked, len(blockedIPs))
 		}
 	}
@@ -721,19 +821,19 @@ func (d *Defender) SetEventStream(eventStream *EventStream) {
 }
 
 type Stats struct {
-	TotalIPs        int       `json:"total_ips"`
-	BlockedIPs      int       `json:"blocked_ips"`
-	ActiveIPs       int       `json:"active_ips"`
-	TopIPs          []IPStats `json:"top_ips"`
+	TotalIPs        int         `json:"total_ips"`
+	BlockedIPs      int         `json:"blocked_ips"`
+	ActiveIPs       int         `json:"active_ips"`
+	TopIPs          []IPStats   `json:"top_ips"`
 	MemoryUsage     MemoryStats `json:"memory_usage"`
-	TotalRequests   int64     `json:"total_requests"`
-	BlockedRequests int64     `json:"blocked_requests"`
+	TotalRequests   int64       `json:"total_requests"`
+	BlockedRequests int64       `json:"blocked_requests"`
 }
 
 type MemoryStats struct {
-	TrackedIPs    int   `json:"tracked_ips"`
-	MaxTrackedIPs int   `json:"max_tracked_ips"`
-	DroppedIPs    int64 `json:"dropped_ips"`
+	TrackedIPs    int     `json:"tracked_ips"`
+	MaxTrackedIPs int     `json:"max_tracked_ips"`
+	DroppedIPs    int64   `json:"dropped_ips"`
 	UsagePercent  float64 `json:"usage_percent"`
 }
 
@@ -784,7 +884,7 @@ func (d *Defender) GetStats(w http.ResponseWriter, r *http.Request) {
 	for _, info := range blockedIPs {
 		stats.TopIPs = append(stats.TopIPs, IPStats{
 			IP:        info.IP,
-			Requests:  0,  // Not tracked in storage
+			Requests:  0, // Not tracked in storage
 			Blocked:   true,
 			BlockedAt: info.BlockedAt.Format(time.RFC3339),
 		})
@@ -795,14 +895,14 @@ func (d *Defender) GetStats(w http.ResponseWriter, r *http.Request) {
 }
 
 type Report struct {
-	GeneratedAt      string       `json:"generated_at"`
-	Period           string       `json:"period"`
-	TotalRequests    int64        `json:"total_requests"`
-	BlockedRequests  int64        `json:"blocked_requests"`
-	UniqueIPs        int          `json:"unique_ips"`
-	BlockedIPs       int          `json:"blocked_ips_count"`
+	GeneratedAt      string               `json:"generated_at"`
+	Period           string               `json:"period"`
+	TotalRequests    int64                `json:"total_requests"`
+	BlockedRequests  int64                `json:"blocked_requests"`
+	UniqueIPs        int                  `json:"unique_ips"`
+	BlockedIPs       int                  `json:"blocked_ips_count"`
 	BlockEvents      []storage.BlockEvent `json:"block_events"`
-	TopSuspiciousIPs []IPStats    `json:"top_suspicious_ips"`
+	TopSuspiciousIPs []IPStats            `json:"top_suspicious_ips"`
 }
 
 func (d *Defender) GenerateReport(periodHours int) Report {
@@ -840,7 +940,7 @@ func (d *Defender) GenerateReport(periodHours int) Report {
 		log.Printf("Error fetching blocked IPs: %v", err)
 	} else {
 		report.BlockedIPs = len(blockedIPs)
-		
+
 		// Convert to IPStats
 		var ipStats []IPStats
 		for _, info := range blockedIPs {
