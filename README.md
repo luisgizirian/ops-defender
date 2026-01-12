@@ -44,6 +44,55 @@ The service analyzes incoming requests asynchronously, tracks suspicious pattern
 - **Deferred analysis** for other patterns - ~5 requests before blocking
 - **Automated reporting** (daily and weekly)
 - **Email notifications** (optional)
+- **Extensibility framework** - Add custom patterns, rules, and logic without forking ✨
+
+## Extensibility
+
+Ops Defender supports an **Open Core + Private Extension** architecture, allowing you to add organization-specific functionality without modifying or forking the core codebase.
+
+### Extension Points
+
+- **Pattern Providers** - Add custom suspicious patterns (e.g., `/internal-api`, `/company-admin`)
+- **Blocking Rule Providers** - Implement custom blocking logic (rate limiting, behavioral analysis)
+- **Whitelist Providers** - Define organization-specific paths to never block (CDN, health checks)
+- **Test Rule Providers** - Extend unit tests with custom test cases
+
+### Quick Example
+
+```go
+// In your private repository
+import "github.com/ops/defender/extension-points"
+
+type MyPatternProvider struct{}
+
+func (m *MyPatternProvider) GetPatterns() []string {
+    return []string{
+        `/internal-api`,     // Block internal endpoints
+        `/company-admin`,    // Block company-specific admin
+    }
+}
+
+func (m *MyPatternProvider) GetName() string { return "Company Patterns" }
+func (m *MyPatternProvider) GetPriority() int { return 50 }
+
+// Register and use
+registry := extensions.NewExtensionRegistry()
+registry.RegisterPatternProvider(&MyPatternProvider{})
+
+defender := defender.NewDefender(DefenderOptions{
+    ExtensionRegistry: registry,
+    // ... other options
+})
+```
+
+### Benefits
+
+✅ **No forking** - Extensions live in separate repositories  
+✅ **No rebasing** - Core updates don't conflict with your customizations  
+✅ **Stable contracts** - Well-defined interfaces that rarely change  
+✅ **Clean separation** - Public core stays generic, extensions add specifics  
+
+**Learn more:** See [EXTENSIBILITY.md](EXTENSIBILITY.md) for complete architecture guide and examples.
 
 ## How It Works
 
@@ -1125,6 +1174,7 @@ curl -H "X-Real-IP: 192.168.1.200" \
 
 ## Documentation
 
+- **[EXTENSIBILITY.md](EXTENSIBILITY.md)** - Extensibility architecture and implementation guide
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** - Development guide and getting started
 - **[DEPLOYMENT.md](DEPLOYMENT.md)** - Production deployment guide
 - **[ROLLBACK.md](ROLLBACK.md)** - Fast rollback procedures for production
@@ -1132,6 +1182,7 @@ curl -H "X-Real-IP: 192.168.1.200" \
 - **[.devcontainer/README.md](.devcontainer/README.md)** - Dev container comprehensive guide
 - **[examples/MONITORING.md](examples/MONITORING.md)** - Complete monitoring and visualization guide
 - **[examples/AZURE-INSIGHTS.md](examples/AZURE-INSIGHTS.md)** - Azure Application Insights integration
+- **[examples/extensions/README.md](examples/extensions/README.md)** - Extension examples and usage
 - **[examples/grafana-dashboard.json](examples/grafana-dashboard.json)** - Grafana dashboard template
 - **[examples/prometheus.yml](examples/prometheus.yml)** - Prometheus configuration example
 
