@@ -319,9 +319,12 @@ reporter.go          - Scheduled reports (daily/weekly), email notifications
 metrics.go           - Prometheus/OpenMetrics endpoint, time-series data
 events.go            - Server-Sent Events (SSE) for real-time monitoring
 telemetry.go         - Azure Application Insights integration
+extension-points/    - Extension interfaces for private customization
+examples/extensions/ - Example extension implementations
 test-attacks.sh      - End-to-end attack detection validation
 load-test.sh         - Performance testing with mixed traffic
 defender_test.go     - Unit tests for pattern detection
+extensions_test.go   - Unit tests for extension system
 .devcontainer/       - VS Code dev container configuration
 .vscode/             - VS Code debugging and settings (launch.json, settings.json)
 examples/            - Monitoring configurations, dashboards, integration guides
@@ -332,8 +335,22 @@ examples/            - Monitoring configurations, dashboards, integration guides
 **defender.go:**
 - All blocking logic must go through storage interface (Redis/memory)
 - Pattern detection uses pre-compiled regex in `suspiciousPatterns`
-- New attack patterns: Add to `patterns` slice in `NewDefender()`
+- New attack patterns: Add to `patterns` slice in `NewDefender()` OR use extension providers
+- Extension patterns loaded from `ExtensionRegistry` if provided
+- Custom blocking rules evaluated in `analyzeIP()` after built-in patterns
 - Block events must be recorded via `storage.RecordBlockEvent()` for reporting
+
+**extension-points/interfaces.go:**
+- Defines stable extension contracts (PatternProvider, BlockingRuleProvider, etc.)
+- ExtensionRegistry manages all registered extensions
+- Extensions sorted by priority (higher = evaluated first)
+- **DO NOT change interfaces** without major version bump and migration guide
+
+**examples/extensions/:**
+- Reference implementations of all extension types
+- Used for documentation and testing
+- Shows best practices for extension development
+- Private repositories should use similar structure
 
 **storage.go:**
 - Two implementations: `RedisStorage` (production) and `MemoryStorage` (dev/testing)
@@ -369,6 +386,7 @@ examples/            - Monitoring configurations, dashboards, integration guides
 
 ### Adding New Attack Pattern
 
+**Option 1: Direct Addition (Public Core)**
 1. Add regex pattern to `defender.go` `NewDefender()` patterns slice:
    ```go
    patterns := []string{
@@ -387,6 +405,51 @@ examples/            - Monitoring configurations, dashboards, integration guides
    ```
 
 3. Run validation: `./test-attacks.sh`
+
+**Option 2: Extension (Private Customization - RECOMMENDED)**
+1. Create extension provider in private repository:
+   ```go
+   type MyPatternProvider struct{}
+   
+   func (m *MyPatternProvider) GetPatterns() []string {
+       return []string{`your-new-pattern`}
+   }
+   func (m *MyPatternProvider) GetName() string { return "My Patterns" }
+   func (m *MyPatternProvider) GetPriority() int { return 0 }
+   ```
+
+2. Register with defender:
+   ```go
+   registry := extensions.NewExtensionRegistry()
+   registry.RegisterPatternProvider(&MyPatternProvider{})
+   
+   defender := NewDefender(DefenderOptions{
+       ExtensionRegistry: registry,
+       // ... other options
+   })
+   ```
+
+3. See [EXTENSIBILITY.md](../EXTENSIBILITY.md) for complete guide
+
+### Creating Custom Extensions
+
+1. **Create private repository** for your extensions
+2. **Import extension-points package** from public core
+3. **Implement extension interfaces** (PatternProvider, BlockingRuleProvider, etc.)
+4. **Register extensions** in your main.go
+5. **Test thoroughly** using TestRuleProvider
+
+Example structure:
+```
+your-company/ops-defender-extensions/
+├── go.mod                     # Depends on public core
+├── patterns/
+│   ├── internal_api.go
+│   └── critical_paths.go
+├── rules/
+│   └── rate_limiting.go
+└── main.go                    # Registers extensions
+```
 
 ### Testing Changes Locally
 
