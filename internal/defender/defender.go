@@ -647,7 +647,7 @@ func (d *Defender) extractIP(r *http.Request) string {
 		}
 	}
   
-  // Fallback to remote address - use net.SplitHostPort for proper IPv4/IPv6 handling
+  	// Fallback to remote address - use net.SplitHostPort for proper IPv4/IPv6 handling
 	// RemoteAddr format: "IP:port" for IPv4 or "[IPv6]:port" for IPv6
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err == nil {
@@ -655,7 +655,7 @@ func (d *Defender) extractIP(r *http.Request) string {
 	}
 	
 	// If SplitHostPort fails, return RemoteAddr as-is (edge case)
-  return r.RemoteAddr
+  	return r.RemoteAddr
 }
 
 // evictBulkIPsSync evicts a batch of oldest IPs (LRU) synchronously
