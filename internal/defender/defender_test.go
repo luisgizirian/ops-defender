@@ -1,6 +1,7 @@
 package defender
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -132,19 +133,54 @@ func TestDefender_ExtractIP(t *testing.T) {
 	})
 
 	tests := []struct {
-		name     string
-		headers  map[string]string
-		expected string
+		name       string
+		headers    map[string]string
+		remoteAddr string
+		expected   string
 	}{
 		{
-			name:     "X-Real-IP header",
+			name:     "X-Real-IP header with IPv4",
 			headers:  map[string]string{"X-Real-IP": "10.0.0.1"},
 			expected: "10.0.0.1",
 		},
 		{
-			name:     "X-Forwarded-For header",
+			name:     "X-Real-IP header with IPv6",
+			headers:  map[string]string{"X-Real-IP": "2001:db8::1"},
+			expected: "2001:db8::1",
+		},
+		{
+			name:     "X-Forwarded-For header with IPv4",
 			headers:  map[string]string{"X-Forwarded-For": "10.0.0.2, 10.0.0.3"},
 			expected: "10.0.0.2",
+		},
+		{
+			name:     "X-Forwarded-For header with IPv6",
+			headers:  map[string]string{"X-Forwarded-For": "2001:db8::2, 2001:db8::3"},
+			expected: "2001:db8::2",
+		},
+		{
+			name:       "RemoteAddr with IPv4",
+			headers:    map[string]string{},
+			remoteAddr: "192.168.1.1:54321",
+			expected:   "192.168.1.1",
+		},
+		{
+			name:       "RemoteAddr with IPv6",
+			headers:    map[string]string{},
+			remoteAddr: "[2001:db8::1]:54321",
+			expected:   "2001:db8::1",
+		},
+		{
+			name:       "RemoteAddr with IPv6 loopback",
+			headers:    map[string]string{},
+			remoteAddr: "[::1]:12345",
+			expected:   "::1",
+		},
+		{
+			name:       "RemoteAddr with full IPv6",
+			headers:    map[string]string{},
+			remoteAddr: "[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:8080",
+			expected:   "2001:0db8:85a3:0000:0000:8a2e:0370:7334",
 		},
 	}
 
@@ -154,6 +190,9 @@ func TestDefender_ExtractIP(t *testing.T) {
 			for k, v := range tt.headers {
 				req.Header.Set(k, v)
 			}
+			if tt.remoteAddr != "" {
+				req.RemoteAddr = tt.remoteAddr
+			}
 
 			ip := defender.extractIP(req)
 			if ip != tt.expected {
@@ -161,6 +200,24 @@ func TestDefender_ExtractIP(t *testing.T) {
 			}
 		})
 	}
+
+	// Test that extracted IPs work correctly with storage
+	t.Run("IPv6 storage integration", func(t *testing.T) {
+		ctx := context.Background()
+		ipv6 := "2001:db8::42"
+		err := store.BlockIP(ctx, ipv6, "test", 60*time.Minute)
+		if err != nil {
+			t.Fatalf("Failed to block IPv6: %v", err)
+		}
+
+		blocked, err := store.IsBlocked(ctx, ipv6)
+		if err != nil {
+			t.Fatalf("Failed to check IPv6 block status: %v", err)
+		}
+		if !blocked {
+			t.Errorf("IPv6 address should be blocked")
+		}
+	})
 }
 
 func TestDefender_IsSuspicious(t *testing.T) {

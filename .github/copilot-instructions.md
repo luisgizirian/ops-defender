@@ -43,6 +43,8 @@ Ops Defender is a high-performance **HTTP-based** request monitoring service des
 2. Make routing decisions based on HTTP status codes
 3. Pass client IP and URI as headers
 
+**IPv4 and IPv6 Support:** Ops Defender fully supports both IPv4 and IPv6 addresses. The `extractIP()` function uses Go's `net.SplitHostPort()` to correctly parse both address formats from headers (X-Real-IP, X-Forwarded-For) and RemoteAddr.
+
 **Key Design Principle:** First N requests (default 5) from any IP are always allowed through for analysis, then suspicious IPs are blocked for configured duration (default 24 hours).
 
 ## Critical Architecture Concepts
