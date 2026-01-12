@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ops/defender/extension-points"
 	"github.com/ops/defender/internal/storage"
 )
 
@@ -39,13 +40,14 @@ type IPTracker struct {
 
 // DefenderOptions contains configuration options for creating a new Defender
 type DefenderOptions struct {
-	AnalysisThreshold    int             // Number of requests to collect before analysis
-	BlockDuration        time.Duration   // Duration to block suspicious IPs
-	Storage              storage.Storage // Redis or memory storage for blocked IPs
-	MaxTrackedIPs        int             // Maximum number of IPs to track simultaneously
-	EvictionBatchPct     float64         // Percentage of IPs to evict in bulk (0.01-1.0, default 0.10)
-	EvictionThresholdPct float64         // Preemptive eviction threshold (0.5-1.0, default 0.93)
-	SimulationMode       bool            // When true, log blocks but don't actually block requests
+	AnalysisThreshold    int                         // Number of requests to collect before analysis
+	BlockDuration        time.Duration               // Duration to block suspicious IPs
+	Storage              storage.Storage             // Redis or memory storage for blocked IPs
+	MaxTrackedIPs        int                         // Maximum number of IPs to track simultaneously
+	EvictionBatchPct     float64                     // Percentage of IPs to evict in bulk (0.01-1.0, default 0.10)
+	EvictionThresholdPct float64                     // Preemptive eviction threshold (0.5-1.0, default 0.93)
+	SimulationMode       bool                        // When true, log blocks but don't actually block requests
+	ExtensionRegistry    *extensions.ExtensionRegistry // Optional extension registry for custom patterns and rules
 }
 
 type Defender struct {
@@ -63,18 +65,19 @@ type Defender struct {
 	analysisChan             chan string
 	totalRequests            int64
 	blockedRequests          int64
-	whitelistedRequests      int64                 // Counter for whitelisted static asset requests
-	pathTraversalBlocks      int64                 // Counter for blocks due to path traversal
-	excessiveNestingBlocks   int64                 // Counter for blocks due to excessive URL-encoded nesting
-	suspiciousBlocks         int64                 // Counter for blocks due to suspicious patterns
-	maxTrackedIPs            int                   // Maximum number of IPs to track simultaneously
-	droppedIPs               int64                 // Counter for IPs dropped due to memory limits
-	evictionBatchPct         float64               // Percentage of IPs to evict in bulk (default 0.10 = 10%)
-	evictionInProgress       bool                  // Flag to prevent concurrent evictions
-	evictionThreshold        int                   // Preemptive eviction threshold (e.g., 90% of max)
-	simulationMode           bool                  // When true, log blocks but don't actually block requests
-	telemetry                *AppInsightsTelemetry // Azure Application Insights telemetry
-	eventStream              *EventStream          // Real-time event stream
+	whitelistedRequests      int64                   // Counter for whitelisted static asset requests
+	pathTraversalBlocks      int64                   // Counter for blocks due to path traversal
+	excessiveNestingBlocks   int64                   // Counter for blocks due to excessive URL-encoded nesting
+	suspiciousBlocks         int64                   // Counter for blocks due to suspicious patterns
+	maxTrackedIPs            int                     // Maximum number of IPs to track simultaneously
+	droppedIPs               int64                   // Counter for IPs dropped due to memory limits
+	evictionBatchPct         float64                 // Percentage of IPs to evict in bulk (default 0.10 = 10%)
+	evictionInProgress       bool                    // Flag to prevent concurrent evictions
+	evictionThreshold        int                     // Preemptive eviction threshold (e.g., 90% of max)
+	simulationMode           bool                    // When true, log blocks but don't actually block requests
+	telemetry                *AppInsightsTelemetry   // Azure Application Insights telemetry
+	eventStream              *EventStream            // Real-time event stream
+	extensionRegistry        *extensions.ExtensionRegistry // Optional extension registry for custom patterns and rules
 }
 
 func NewDefender(opts DefenderOptions) *Defender {
@@ -113,6 +116,7 @@ func NewDefender(opts DefenderOptions) *Defender {
 		evictionInProgress: false,
 		evictionThreshold:  evictionThreshold,
 		simulationMode:     opts.SimulationMode,
+		extensionRegistry:  opts.ExtensionRegistry,
 	}
 
 	// Initialize path traversal patterns (checked on ALL requests including whitelisted)
@@ -188,6 +192,18 @@ func NewDefender(opts DefenderOptions) *Defender {
 		if re, err := regexp.Compile(`(?i)` + pattern); err == nil {
 			d.suspiciousPatterns = append(d.suspiciousPatterns, re)
 		}
+	}
+
+	// Load patterns from extension registry if provided
+	if d.extensionRegistry != nil {
+		extensionPatterns := d.extensionRegistry.GetAllPatterns()
+		d.suspiciousPatterns = append(d.suspiciousPatterns, extensionPatterns...)
+		log.Printf("Loaded %d extension patterns", len(extensionPatterns))
+
+		// Load whitelist patterns from extensions
+		extensionWhitelists := d.extensionRegistry.GetAllWhitelistPatterns()
+		d.whitelistPatterns = append(d.whitelistPatterns, extensionWhitelists...)
+		log.Printf("Loaded %d extension whitelist patterns", len(extensionWhitelists))
 	}
 
 	// Start background workers
@@ -471,6 +487,37 @@ func (d *Defender) analyzeIP(ip string) {
 				suspicious = true
 				suspiciousURI = reqLog.URI
 				reason = "Suspicious URL pattern detected"
+				break
+			}
+		}
+	}
+
+	// Check custom blocking rules from extensions
+	if !suspicious && d.extensionRegistry != nil {
+		blockingRules := d.extensionRegistry.GetAllBlockingRules()
+		requestCount := len(tracker.RequestLogs)
+		
+		// Convert request logs to extension-compatible format
+		requestLogInfos := make([]extensions.RequestLogInfo, len(tracker.RequestLogs))
+		for i, reqLog := range tracker.RequestLogs {
+			requestLogInfos[i] = extensions.RequestLogInfo{
+				URI:           reqLog.URI,
+				Timestamp:     reqLog.Timestamp.Format(time.RFC3339),
+				UserAgent:     reqLog.UserAgent,
+				IsWhitelisted: reqLog.IsWhitelisted,
+			}
+		}
+		
+		// Apply blocking rules in priority order
+		for _, rule := range blockingRules {
+			shouldBlock, blockReason := rule.ShouldBlock(ip, requestCount, requestLogInfos)
+			if shouldBlock {
+				suspicious = true
+				reason = fmt.Sprintf("Extension rule: %s", blockReason)
+				if len(tracker.RequestLogs) > 0 {
+					suspiciousURI = tracker.RequestLogs[len(tracker.RequestLogs)-1].URI
+				}
+				log.Printf("IP %s blocked by extension rule '%s': %s", ip, rule.GetName(), blockReason)
 				break
 			}
 		}

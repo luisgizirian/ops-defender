@@ -84,8 +84,8 @@ func TestDefender_CheckRequest_BlocksSuspiciousPath(t *testing.T) {
 	w := httptest.NewRecorder()
 	defender.CheckRequest(w, req)
 	
-	// Expecting 404 (NotFound) which is what handleBlockedRequest returns in non-simulation mode
-	if w.Code != http.StatusNotFound {
+	// Expecting 403 (Forbidden) which is what handleBlockedRequest returns in non-simulation mode
+	if w.Code != http.StatusForbidden {
 		t.Errorf("Expected IP to be blocked after suspicious patterns detected, got %d", w.Code)
 	}
 }
@@ -114,7 +114,7 @@ func TestDefender_CheckRequest_BlocksRateLimitExceeded(t *testing.T) {
 		defender.CheckRequest(w, req)
 
 		// After enough requests, should be blocked
-		if i >= 15 && w.Code == http.StatusNotFound {
+		if i >= 15 && w.Code == http.StatusForbidden {
 			return // Test passed
 		}
 	}
@@ -944,7 +944,7 @@ func TestDefender_PartialWhitelisting(t *testing.T) {
 	w := httptest.NewRecorder()
 	defender.CheckRequest(w, req)
 	
-	if w.Code != http.StatusNotFound {
+	if w.Code != http.StatusForbidden {
 		t.Errorf("Expected IP with suspicious request to be blocked, got %d", w.Code)
 	}
 	
@@ -1008,7 +1008,7 @@ func TestDefender_PathTraversalOnStaticAssets(t *testing.T) {
 	w := httptest.NewRecorder()
 	defender.CheckRequest(w, req)
 	
-	if w.Code != http.StatusNotFound {
+	if w.Code != http.StatusForbidden {
 		t.Errorf("Expected IP with path traversal to be blocked, got %d", w.Code)
 	}
 	
@@ -1157,7 +1157,7 @@ func TestDefender_ExcessiveNesting_UnforgivingBehavior(t *testing.T) {
 	defender.CheckRequest(w1, req1)
 
 	// CHANGED: First request should now be blocked immediately (not allowed)
-	if w1.Code != http.StatusNotFound {
+	if w1.Code != http.StatusForbidden {
 		t.Errorf("First excessive nesting request should be blocked immediately, got %d", w1.Code)
 	}
 
@@ -1168,8 +1168,8 @@ func TestDefender_ExcessiveNesting_UnforgivingBehavior(t *testing.T) {
 	w2 := httptest.NewRecorder()
 	defender.CheckRequest(w2, req2)
 
-	if w2.Code != http.StatusNotFound {
-		t.Errorf("Second request should be blocked (cached), got %d, expected 404", w2.Code)
+	if w2.Code != http.StatusForbidden {
+		t.Errorf("Second request should be blocked (cached), got %d, expected 403", w2.Code)
 	}
 
 	// Verify IP is in blocked cache
