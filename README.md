@@ -19,9 +19,9 @@ High-performance HTTP-based request defense system that detects abuse-like suspi
 
 ## Overview
 
-Ops Defender runs as a **standalone HTTP service** designed to integrate with **any reverse proxy or API gateway** that can forward HTTP requests. While our examples use Nginx's `auth_request` directive, the HTTP-based architecture makes it compatible with Caddy, Traefik, HAProxy, Apache, or any proxy that can validate requests via HTTP.
+Ops Defender analyzes incoming requests asynchronously, tracks suspicious patterns, and automatically blocks malicious IPs without impacting legitimate traffic performance.
 
-The service analyzes incoming requests asynchronously, tracks suspicious patterns, and automatically blocks malicious IPs without impacting legitimate traffic performance.
+The service runs as a **standalone HTTP service** designed to integrate with **any reverse proxy or API gateway** that can forward HTTP requests. While our examples use Nginx's `auth_request` directive, the HTTP-based architecture makes it compatible with Caddy, Traefik, HAProxy, Apache, or any proxy that can validate requests via HTTP.
 
 ## Features
 
