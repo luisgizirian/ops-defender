@@ -61,7 +61,7 @@ Ops Defender supports an **Open Core + Private Extension** architecture, allowin
 
 ```go
 // In your private repository
-import "github.com/ops/defender/extension-points"
+import "github.com/luisgizirian/ops-defender/extension-points"
 
 type MyPatternProvider struct{}
 

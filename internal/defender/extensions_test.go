@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ops/defender/extension-points"
+	extensions "github.com/ops/defender/extension-points"
 	"github.com/ops/defender/internal/storage"
 )
 
@@ -297,5 +297,324 @@ func TestDefender_NoExtensionRegistry(t *testing.T) {
 	
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected request to be allowed without extensions, got %d", w.Code)
+	}
+}
+
+// TestPreRequestHandler for testing early request interception
+type TestPreRequestHandler struct {
+	name         string
+	priority     int
+	shouldTerminate bool
+	callCount    int
+}
+
+func (t *TestPreRequestHandler) Handle(ip, uri, userAgent string) extensions.RequestAction {
+	t.callCount++
+	if t.shouldTerminate {
+		return extensions.Terminate
+	}
+	return extensions.Continue
+}
+
+func (t *TestPreRequestHandler) GetName() string {
+	return t.name
+}
+
+func (t *TestPreRequestHandler) GetPriority() int {
+	return t.priority
+}
+
+// TestPostRequestHandler for testing late request interception
+type TestPostRequestHandler struct {
+	name         string
+	priority     int
+	shouldTerminate bool
+	callCount    int
+	lastRequestCount int
+}
+
+func (t *TestPostRequestHandler) Handle(ip, uri, userAgent string, requestCount int) extensions.RequestAction {
+	t.callCount++
+	t.lastRequestCount = requestCount
+	if t.shouldTerminate {
+		return extensions.Terminate
+	}
+	return extensions.Continue
+}
+
+func (t *TestPostRequestHandler) GetName() string {
+	return t.name
+}
+
+func (t *TestPostRequestHandler) GetPriority() int {
+	return t.priority
+}
+
+func TestDefender_PreRequestHandler_Continue(t *testing.T) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	
+	preHandler := &TestPreRequestHandler{
+		name:         "Test Pre-Handler",
+		priority:     0,
+		shouldTerminate: false,
+	}
+	
+	registry := extensions.NewExtensionRegistry()
+	registry.RegisterPreRequestHandler(preHandler)
+	
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    3,
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+		ExtensionRegistry:    registry,
+	})
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("X-Real-IP", "192.168.1.204")
+	req.Header.Set("X-Original-URI", "/normal-path")
+
+	w := httptest.NewRecorder()
+	defender.CheckRequest(w, req)
+	
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected request to be allowed, got %d", w.Code)
+	}
+	
+	if preHandler.callCount != 1 {
+		t.Errorf("Expected pre-handler to be called once, got %d", preHandler.callCount)
+	}
+}
+
+func TestDefender_PreRequestHandler_Terminate(t *testing.T) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	
+	preHandler := &TestPreRequestHandler{
+		name:         "Test Pre-Handler Terminate",
+		priority:     0,
+		shouldTerminate: true,
+	}
+	
+	registry := extensions.NewExtensionRegistry()
+	registry.RegisterPreRequestHandler(preHandler)
+	
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    3,
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+		ExtensionRegistry:    registry,
+	})
+
+	ip := "192.168.1.205"
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("X-Real-IP", ip)
+	req.Header.Set("X-Original-URI", "/normal-path")
+
+	w := httptest.NewRecorder()
+	defender.CheckRequest(w, req)
+	
+	// Pre-handler terminated, should return 200 OK
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected request to be allowed after pre-handler terminate, got %d", w.Code)
+	}
+	
+	if preHandler.callCount != 1 {
+		t.Errorf("Expected pre-handler to be called once, got %d", preHandler.callCount)
+	}
+	
+	// Verify IP was NOT logged (pre-handler terminated before logging)
+	defender.mu.RLock()
+	_, tracked := defender.ipTrackers[ip]
+	defender.mu.RUnlock()
+	
+	if tracked {
+		t.Error("Expected IP to NOT be tracked after pre-handler terminate")
+	}
+}
+
+func TestDefender_PostRequestHandler_Continue(t *testing.T) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	
+	postHandler := &TestPostRequestHandler{
+		name:         "Test Post-Handler",
+		priority:     0,
+		shouldTerminate: false,
+	}
+	
+	registry := extensions.NewExtensionRegistry()
+	registry.RegisterPostRequestHandler(postHandler)
+	
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    3,
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+		ExtensionRegistry:    registry,
+	})
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("X-Real-IP", "192.168.1.206")
+	req.Header.Set("X-Original-URI", "/normal-path")
+
+	w := httptest.NewRecorder()
+	defender.CheckRequest(w, req)
+	
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected request to be allowed, got %d", w.Code)
+	}
+	
+	if postHandler.callCount != 1 {
+		t.Errorf("Expected post-handler to be called once, got %d", postHandler.callCount)
+	}
+	
+	if postHandler.lastRequestCount != 1 {
+		t.Errorf("Expected requestCount to be 1, got %d", postHandler.lastRequestCount)
+	}
+}
+
+func TestDefender_PreAndPostHandlers_Together(t *testing.T) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	
+	preHandler := &TestPreRequestHandler{
+		name:         "Test Pre",
+		priority:     0,
+		shouldTerminate: false,
+	}
+	
+	postHandler := &TestPostRequestHandler{
+		name:         "Test Post",
+		priority:     0,
+		shouldTerminate: false,
+	}
+	
+	registry := extensions.NewExtensionRegistry()
+	registry.RegisterPreRequestHandler(preHandler)
+	registry.RegisterPostRequestHandler(postHandler)
+	
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    3,
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+		ExtensionRegistry:    registry,
+	})
+
+	ip := "192.168.1.207"
+	
+	// Send 3 requests
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.Header.Set("X-Real-IP", ip)
+		req.Header.Set("X-Original-URI", "/normal-path")
+
+		w := httptest.NewRecorder()
+		defender.CheckRequest(w, req)
+		
+		if w.Code != http.StatusOK {
+			t.Errorf("Request %d: Expected to be allowed, got %d", i, w.Code)
+		}
+	}
+	
+	// Both handlers should be called 3 times
+	if preHandler.callCount != 3 {
+		t.Errorf("Expected pre-handler to be called 3 times, got %d", preHandler.callCount)
+	}
+	
+	if postHandler.callCount != 3 {
+		t.Errorf("Expected post-handler to be called 3 times, got %d", postHandler.callCount)
+	}
+	
+	// Last request count should be 3
+	if postHandler.lastRequestCount != 3 {
+		t.Errorf("Expected last requestCount to be 3, got %d", postHandler.lastRequestCount)
+	}
+}
+
+func TestDefender_HandlerPriority(t *testing.T) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	
+	// Create handlers with different priorities
+	lowPriorityPre := &TestPreRequestHandler{
+		name:         "Low Priority Pre",
+		priority:     0,
+		shouldTerminate: false,
+	}
+	
+	highPriorityPre := &TestPreRequestHandler{
+		name:         "High Priority Pre",
+		priority:     100,
+		shouldTerminate: true, // This should terminate first
+	}
+	
+	registry := extensions.NewExtensionRegistry()
+	registry.RegisterPreRequestHandler(lowPriorityPre)
+	registry.RegisterPreRequestHandler(highPriorityPre)
+	
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    3,
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+		ExtensionRegistry:    registry,
+	})
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("X-Real-IP", "192.168.1.208")
+	req.Header.Set("X-Original-URI", "/normal-path")
+
+	w := httptest.NewRecorder()
+	defender.CheckRequest(w, req)
+	
+	// High priority handler should terminate, preventing low priority from running
+	if highPriorityPre.callCount != 1 {
+		t.Errorf("Expected high priority pre-handler to be called, got %d", highPriorityPre.callCount)
+	}
+	
+	if lowPriorityPre.callCount != 0 {
+		t.Errorf("Expected low priority pre-handler to NOT be called (terminated by high priority), got %d", lowPriorityPre.callCount)
+	}
+}
+
+func TestDefender_NoHandlersRegistered(t *testing.T) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	
+	// Create defender without any handlers registered
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    3,
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+		ExtensionRegistry:    nil,
+	})
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("X-Real-IP", "192.168.1.209")
+	req.Header.Set("X-Original-URI", "/normal-path")
+
+	w := httptest.NewRecorder()
+	defender.CheckRequest(w, req)
+	
+	// Should work normally without any handlers
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected request to be allowed without handlers, got %d", w.Code)
 	}
 }
