@@ -49,7 +49,7 @@ go get github.com/ops/defender@latest
 // patterns/internal_api.go
 package patterns
 
-import "github.com/ops/defender/extension-points"
+import "github.com/luisgizirian/ops-defender/extension-points"
 
 type InternalAPIPatternProvider struct{}
 
@@ -198,7 +198,7 @@ func (c *CriticalSecurityPatternProvider) GetPriority() int {
 // rules/rate_limiting.go
 package rules
 
-import "github.com/ops/defender/extension-points"
+import "github.com/luisgizirian/ops-defender/extension-points"
 
 type RateLimitingRule struct{}
 
@@ -404,7 +404,7 @@ module your-company/ops-defender-extensions
 go 1.25
 
 require (
-    github.com/ops/defender v1.2.3  // Pin to specific version
+    github.com/luisgizirian/ops-defender v1.2.3  // Pin to specific version
 )
 ```
 

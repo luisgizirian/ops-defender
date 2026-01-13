@@ -4,6 +4,16 @@ import (
 	"regexp"
 )
 
+// RequestAction defines what the core should do after an extension handler processes a request
+type RequestAction int
+
+const (
+	// Continue indicates the request should proceed through normal processing
+	Continue RequestAction = iota
+	// Terminate indicates the request should be terminated (200 OK response without further processing)
+	Terminate
+)
+
 // PatternProvider defines the interface for extending suspicious pattern detection
 // Private extensions can implement this to add custom attack patterns without modifying core code
 type PatternProvider interface {
@@ -74,6 +84,38 @@ type WhitelistProvider interface {
 	GetPriority() int
 }
 
+// PreRequestHandler defines the interface for early request lifecycle hooks
+// Called before core processing (logging, analysis, etc.)
+// Private extensions can implement this for custom pre-processing logic
+type PreRequestHandler interface {
+	// Handle is called early in request processing, before logging
+	// Returns Continue to proceed with normal processing, or Terminate to end processing
+	// When Terminate is returned, core sends 200 OK without further processing
+	Handle(ip, uri, userAgent string) RequestAction
+
+	// GetName returns a descriptive name for this handler
+	GetName() string
+
+	// GetPriority returns the priority of this handler (higher = evaluated first)
+	GetPriority() int
+}
+
+// PostRequestHandler defines the interface for late request lifecycle hooks
+// Called after core processing (logging) but before final response
+// Private extensions can implement this for custom post-processing logic
+type PostRequestHandler interface {
+	// Handle is called after request logging, before response
+	// Returns Continue to proceed with normal response, or Terminate to end processing
+	// When Terminate is returned, core sends 200 OK without further processing
+	Handle(ip, uri, userAgent string, requestCount int) RequestAction
+
+	// GetName returns a descriptive name for this handler
+	GetName() string
+
+	// GetPriority returns the priority of this handler (higher = evaluated first)
+	GetPriority() int
+}
+
 // ExtensionRegistry manages all registered extensions
 // This is the central point for registering and accessing extensions
 type ExtensionRegistry struct {
@@ -81,6 +123,8 @@ type ExtensionRegistry struct {
 	blockingRuleProviders  []BlockingRuleProvider
 	testRuleProviders      []TestRuleProvider
 	whitelistProviders     []WhitelistProvider
+	preRequestHandlers     []PreRequestHandler
+	postRequestHandlers    []PostRequestHandler
 }
 
 // NewExtensionRegistry creates a new extension registry
@@ -90,6 +134,8 @@ func NewExtensionRegistry() *ExtensionRegistry {
 		blockingRuleProviders:  make([]BlockingRuleProvider, 0),
 		testRuleProviders:      make([]TestRuleProvider, 0),
 		whitelistProviders:     make([]WhitelistProvider, 0),
+		preRequestHandlers:     make([]PreRequestHandler, 0),
+		postRequestHandlers:    make([]PostRequestHandler, 0),
 	}
 }
 
@@ -111,6 +157,16 @@ func (r *ExtensionRegistry) RegisterTestRuleProvider(provider TestRuleProvider) 
 // RegisterWhitelistProvider registers a new whitelist provider
 func (r *ExtensionRegistry) RegisterWhitelistProvider(provider WhitelistProvider) {
 	r.whitelistProviders = append(r.whitelistProviders, provider)
+}
+
+// RegisterPreRequestHandler registers a new pre-request handler
+func (r *ExtensionRegistry) RegisterPreRequestHandler(handler PreRequestHandler) {
+	r.preRequestHandlers = append(r.preRequestHandlers, handler)
+}
+
+// RegisterPostRequestHandler registers a new post-request handler
+func (r *ExtensionRegistry) RegisterPostRequestHandler(handler PostRequestHandler) {
+	r.postRequestHandlers = append(r.postRequestHandlers, handler)
 }
 
 // GetAllPatterns returns all patterns from all registered providers, sorted by priority
@@ -195,4 +251,37 @@ func (r *ExtensionRegistry) GetAllWhitelistPatterns() []*regexp.Regexp {
 	}
 	
 	return patterns
+}
+// GetAllPreRequestHandlers returns all pre-request handlers, sorted by priority (highest first)
+func (r *ExtensionRegistry) GetAllPreRequestHandlers() []PreRequestHandler {
+	// Sort by priority (highest first)
+	sorted := make([]PreRequestHandler, len(r.preRequestHandlers))
+	copy(sorted, r.preRequestHandlers)
+
+	for i := 0; i < len(sorted); i++ {
+		for j := i + 1; j < len(sorted); j++ {
+			if sorted[j].GetPriority() > sorted[i].GetPriority() {
+				sorted[i], sorted[j] = sorted[j], sorted[i]
+			}
+		}
+	}
+
+	return sorted
+}
+
+// GetAllPostRequestHandlers returns all post-request handlers, sorted by priority (highest first)
+func (r *ExtensionRegistry) GetAllPostRequestHandlers() []PostRequestHandler {
+	// Sort by priority (highest first)
+	sorted := make([]PostRequestHandler, len(r.postRequestHandlers))
+	copy(sorted, r.postRequestHandlers)
+
+	for i := 0; i < len(sorted); i++ {
+		for j := i + 1; j < len(sorted); j++ {
+			if sorted[j].GetPriority() > sorted[i].GetPriority() {
+				sorted[i], sorted[j] = sorted[j], sorted[i]
+			}
+		}
+	}
+
+	return sorted
 }

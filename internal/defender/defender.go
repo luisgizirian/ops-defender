@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ops/defender/extension-points"
+	extensions "github.com/ops/defender/extension-points"
 	"github.com/ops/defender/internal/storage"
 )
 
@@ -265,6 +265,19 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 		log.Printf("DEBUG: IP=%s, URI=%s, HasNesting=%v", ip, uri, d.hasExcessiveNestingFast(uri))
 	}
 
+	// PRE-REQUEST HANDLER HOOK: Call registered pre-request handlers
+	// Allows extensions to intercept requests before any core processing
+	if d.extensionRegistry != nil {
+		preHandlers := d.extensionRegistry.GetAllPreRequestHandlers()
+		for _, handler := range preHandlers {
+			if action := handler.Handle(ip, uri, userAgent); action == extensions.Terminate {
+				// Extension requested termination - allow request through without processing
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+		}
+	}
+
 	// IMMEDIATE CHECK: Block excessive nesting BEFORE logging (unforgiving)
 	// This prevents the first malicious request from reaching the backend
 	if d.hasExcessiveNestingFast(uri) {
@@ -431,6 +444,19 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 		case d.analysisChan <- ip:
 		default:
 			// Channel full, will be analyzed in next cycle
+		}
+	}
+
+	// POST-REQUEST HANDLER HOOK: Call registered post-request handlers
+	// Allows extensions to perform custom post-processing after logging
+	if d.extensionRegistry != nil {
+		postHandlers := d.extensionRegistry.GetAllPostRequestHandlers()
+		for _, handler := range postHandlers {
+			if action := handler.Handle(ip, uri, userAgent, requestCount); action == extensions.Terminate {
+				// Extension requested termination - allow request through without further processing
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 		}
 	}
 

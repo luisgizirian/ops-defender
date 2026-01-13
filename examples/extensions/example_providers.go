@@ -1,7 +1,11 @@
 package examples
 
 import (
-	"github.com/ops/defender/extension-points"
+	"log"
+	"sync"
+	"time"
+
+	extensions "github.com/ops/defender/extension-points"
 )
 
 // ExamplePatternProvider demonstrates how to add custom attack patterns
@@ -217,4 +221,77 @@ func (e *ExampleTestRuleProvider) GetTestCases() []extensions.TestCase {
 
 func (e *ExampleTestRuleProvider) GetName() string {
 	return "Example Custom Test Cases"
+}
+
+// RequestTimingExtension demonstrates how to use pre and post request handlers together
+// This extension measures request processing time by capturing timestamps in pre-handler
+// and logging duration in post-handler
+type RequestTimingExtension struct {
+	mu         sync.RWMutex
+	startTimes map[string]time.Time // Maps "ip:uri" to start time
+}
+
+func NewRequestTimingExtension() *RequestTimingExtension {
+	return &RequestTimingExtension{
+		startTimes: make(map[string]time.Time),
+	}
+}
+
+// PreRequestHandler implementation - captures start time
+func (r *RequestTimingExtension) Handle(ip, uri, userAgent string) extensions.RequestAction {
+	key := ip + ":" + uri
+	r.mu.Lock()
+	r.startTimes[key] = time.Now()
+	r.mu.Unlock()
+	
+	// Continue with normal processing
+	return extensions.Continue
+}
+
+func (r *RequestTimingExtension) GetName() string {
+	return "Request Timing (Pre)"
+}
+
+func (r *RequestTimingExtension) GetPriority() int {
+	return 0
+}
+
+// PostRequestTimingHandler is the companion post-handler for RequestTimingExtension
+type PostRequestTimingHandler struct {
+	extension *RequestTimingExtension
+}
+
+func NewPostRequestTimingHandler(extension *RequestTimingExtension) *PostRequestTimingHandler {
+	return &PostRequestTimingHandler{
+		extension: extension,
+	}
+}
+
+// PostRequestHandler implementation - logs processing duration
+func (p *PostRequestTimingHandler) Handle(ip, uri, userAgent string, requestCount int) extensions.RequestAction {
+	key := ip + ":" + uri
+	p.extension.mu.RLock()
+	startTime, exists := p.extension.startTimes[key]
+	p.extension.mu.RUnlock()
+	
+	if exists {
+		duration := time.Since(startTime)
+		log.Printf("[TIMING] IP=%s, URI=%s, Duration=%v, RequestCount=%d", ip, uri, duration, requestCount)
+		
+		// Clean up the timing entry
+		p.extension.mu.Lock()
+		delete(p.extension.startTimes, key)
+		p.extension.mu.Unlock()
+	}
+	
+	// Continue with normal response
+	return extensions.Continue
+}
+
+func (p *PostRequestTimingHandler) GetName() string {
+	return "Request Timing (Post)"
+}
+
+func (p *PostRequestTimingHandler) GetPriority() int {
+	return 0
 }
