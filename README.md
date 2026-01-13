@@ -30,6 +30,8 @@ Ops Defender runs as a **standalone HTTP service** designed to integrate with **
 - **Automatic IP blocking** after suspicious behavior detected
 - **Configurable analysis threshold** (default: 5 requests)
 - **Thread-safe IP tracking** with automatic cleanup
+- **Memory pressure protection** - Preemptive eviction and health monitoring
+- **Persistent error logging** - File-based error tracking for critical issues
 - **RESTful API** for Nginx auth_request integration
 - **Pattern detection** for common attacks:
   - Path traversal (checked on all requests)
@@ -1123,12 +1125,19 @@ curl -H "X-Real-IP: 192.168.1.200" \
 - Verify scheduler is running: check logs for "Next daily report scheduled"
 - For email: validate SMTP credentials
 
+### Memory pressure or crashes after high traffic
+- Check error log: `/var/log/ops-defender/errors.log` or `/tmp/ops-defender/errors.log`
+- Monitor Redis sorted set size: `redis-cli ZCARD block_events`
+- See **[MEMORY-PRESSURE-FIX.md](MEMORY-PRESSURE-FIX.md)** for details on the fix
+- Health checks run every 5 minutes and will log warnings if thresholds exceeded
+
 ## Documentation
 
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** - Development guide and getting started
 - **[DEPLOYMENT.md](DEPLOYMENT.md)** - Production deployment guide
 - **[ROLLBACK.md](ROLLBACK.md)** - Fast rollback procedures for production
 - **[DDOS-DEFENSE.md](DDOS-DEFENSE.md)** - DDoS protection analysis
+- **[MEMORY-PRESSURE-FIX.md](MEMORY-PRESSURE-FIX.md)** - Memory pressure bug fix (40,000 requests issue)
 - **[.devcontainer/README.md](.devcontainer/README.md)** - Dev container comprehensive guide
 - **[examples/MONITORING.md](examples/MONITORING.md)** - Complete monitoring and visualization guide
 - **[examples/AZURE-INSIGHTS.md](examples/AZURE-INSIGHTS.md)** - Azure Application Insights integration
