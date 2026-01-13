@@ -20,7 +20,7 @@ Ops Defender uses an **Open Core + Private Extension** architecture that allows 
 ```
 ┌──────────────────────────────┐
 │    Public Open Core          │
-│    (github.com/ops/defender) │
+│    (github.com/luisgizirian/ops-defender) │
 │                              │
 │  ┌────────────────────────┐ │
 │  │   Core Defense Logic   │ │
@@ -37,6 +37,8 @@ Ops Defender uses an **Open Core + Private Extension** architecture that allows 
 │  │  - BlockingRuleProvider│ │      │
 │  │  - WhitelistProvider   │ │      │
 │  │  - TestRuleProvider    │ │      │
+│  │  - PreRequestHandler   │ │      │
+│  │  - PostRequestHandler  │ │      │
 │  └────────────────────────┘ │      │
 │           ▲                  │      │
 └───────────┼──────────────────┘      │
@@ -56,7 +58,7 @@ Ops Defender uses an **Open Core + Private Extension** architecture that allows 
 
 ### Repository Structure
 
-**Public Repository** (github.com/ops/defender):
+**Public Repository** (github.com/luisgizirian/ops-defender):
 ```
 ops-defender/
 ├── extension-points/          # Extension interfaces (stable contracts)
@@ -272,7 +274,130 @@ func (c *CompanyTestProvider) GetName() string {
 - CI/CD integration
 - Documentation through tests
 
+### 5. PreRequestHandler Interface
+
+Hook into the request lifecycle **before** any core processing (logging, caching, analysis).
+
+**Interface:**
+```go
+type PreRequestHandler interface {
+    Handle(ip, uri, userAgent string) RequestAction
+    GetName() string
+    GetPriority() int
+}
+
+type RequestAction int
+const (
+    Continue  RequestAction = iota  // Proceed with normal processing
+    Terminate                        // End processing, send 200 OK
+)
+```
+
+**Example:**
+```go
+type TrustedIPHandler struct {
+    trustedCIDRs []*net.IPNet
+}
+
+func (t *TrustedIPHandler) Handle(ip, uri, userAgent string) extensions.RequestAction {
+    parsedIP := net.ParseIP(ip)
+    for _, cidr := range t.trustedCIDRs {
+        if cidr.Contains(parsedIP) {
+            // Bypass all processing for trusted IPs
+            return extensions.Terminate
+        }
+    }
+    // Continue normal processing
+    return extensions.Continue
+}
+
+func (t *TrustedIPHandler) GetName() string {
+    return "Trusted IP Bypass"
+}
+
+func (t *TrustedIPHandler) GetPriority() int {
+    return 100  // High priority - checked first
+}
+```
+
+**Use Cases:**
+- IP exclusion/whitelisting
+- Early request filtering
+- Custom authentication checks
+- Performance optimizations (skip processing for known-good traffic)
+
+**Performance:** Pre-handlers add ~50-100ns per handler when extensions are registered. Zero overhead when `extensionRegistry` is nil.
+
+### 6. PostRequestHandler Interface
+
+Hook into the request lifecycle **after** core processing (logging) but **before** final response.
+
+**Interface:**
+```go
+type PostRequestHandler interface {
+    Handle(ip, uri, userAgent string, requestCount int) RequestAction
+    GetName() string
+    GetPriority() int
+}
+```
+
+**Example (Request Timing):**
+```go
+type RequestTimingHandler struct {
+    extension *RequestTimingExtension  // Shared state with pre-handler
+}
+
+func (r *RequestTimingHandler) Handle(ip, uri, userAgent string, requestCount int) extensions.RequestAction {
+    // Access timing data captured by pre-handler
+    duration := r.extension.GetDuration(ip, uri)
+    log.Printf("[TIMING] IP=%s, Duration=%v, Count=%d", ip, duration, requestCount)
+    
+    // Continue with normal response
+    return extensions.Continue
+}
+```
+
+**Use Cases:**
+- Request timing/profiling
+- Custom logging
+- Audit trails
+- Post-processing metrics
+- Response manipulation (future enhancement)
+
+**Performance:** Post-handlers add ~50-100ns per handler. Executed after logging, so no impact on critical path.
+
+### Combining Pre + Post Handlers
+
+Pre and post handlers can work together by sharing state:
+
+```go
+// See examples/extensions/example_providers.go for complete implementation
+type RequestTimingExtension struct {
+    mu         sync.RWMutex
+    startTimes map[string]time.Time
+}
+
+// Pre-handler captures start time
+func (r *RequestTimingExtension) Handle(ip, uri, userAgent string) extensions.RequestAction {
+    r.startTimes[ip+":"+uri] = time.Now()
+    return extensions.Continue
+}
+
+// Post-handler logs duration
+func (p *PostRequestTimingHandler) Handle(ip, uri, userAgent string, requestCount int) extensions.RequestAction {
+    startTime := p.extension.startTimes[ip+":"+uri]
+    duration := time.Since(startTime)
+    log.Printf("[TIMING] Duration=%v", duration)
+    return extensions.Continue
+}
+```
+
+See [examples/extensions/example_providers.go](examples/extensions/example_providers.go) for a complete working example.
+
 ## Integration Guide
+
+> **💡 Development Environment:**  
+> For the best development experience with both core and private extensions in a unified devcontainer, see [Multi-Repo Devcontainer Guide](examples/extensions/MULTI-REPO-DEVCONTAINER.md).
 
 ### Step 1: Create Private Extension Repository
 
@@ -283,7 +408,7 @@ cd ops-defender-extensions
 go mod init your-company/ops-defender-extensions
 
 # Add dependency on public core
-go get github.com/ops/defender
+go get github.com/luisgizirian/ops-defender
 ```
 
 ### Step 2: Implement Extension Interfaces
@@ -294,7 +419,7 @@ Create your extension providers:
 // patterns/internal_api.go
 package patterns
 
-import "github.com/ops/defender/extension-points"
+import "github.com/luisgizirian/ops-defender/extension-points"
 
 type InternalAPIPatternProvider struct{}
 
@@ -323,8 +448,8 @@ In your private repository's main.go:
 package main
 
 import (
-    "github.com/ops/defender/extension-points"
-    "github.com/ops/defender/internal/defender"
+    "github.com/luisgizirian/ops-defender/extension-points"
+    "github.com/luisgizirian/ops-defender/internal/defender"
     "your-company/ops-defender-extensions/patterns"
     "your-company/ops-defender-extensions/rules"
 )
@@ -441,7 +566,7 @@ module your-company/ops-defender-extensions
 go 1.25
 
 require (
-    github.com/ops/defender v1.2.3  // Pin to specific version
+    github.com/luisgizirian/ops-defender v1.2.3  // Pin to specific version
 )
 ```
 
@@ -607,7 +732,14 @@ The Ops Defender extensibility architecture enables:
 1. ✅ **Private customization** without forking
 2. ✅ **Stable upgrade path** from public core
 3. ✅ **Clean separation** between generic and specific
-4. ✅ **Flexible extension points** for all major features
+4. ✅ **Flexible extension points** for all major features:
+   - Pattern detection (PatternProvider)
+   - Custom blocking rules (BlockingRuleProvider)
+   - URI whitelisting (WhitelistProvider)
+   - Early request hooks (PreRequestHandler)
+   - Late request hooks (PostRequestHandler)
+   - Test case extensions (TestRuleProvider)
 5. ✅ **Production-ready patterns** with examples and tests
+6. ✅ **Zero overhead** when extensions not registered
 
 Start with the examples, implement your extensions in a private repository, and enjoy the benefits of Open Core + Private Extension architecture!
