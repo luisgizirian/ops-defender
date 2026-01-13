@@ -26,6 +26,7 @@ type Storage interface {
 	GetBlockedIPs(ctx context.Context) ([]BlockedIPInfo, error)
 	RecordBlockEvent(ctx context.Context, event BlockEvent) error
 	GetRecentBlockEvents(ctx context.Context, since time.Time) ([]BlockEvent, error)
+	StorageType() string // Returns "redis" or "memory"
 }
 
 // HealthCheckable extends Storage with health monitoring capabilities
@@ -202,6 +203,11 @@ func (rs *RedisStorage) Close() error {
 	return rs.client.Close()
 }
 
+// StorageType returns the storage type identifier
+func (rs *RedisStorage) StorageType() string {
+	return "redis"
+}
+
 // SetErrorLogger sets the error logger for Redis operations
 func (rs *RedisStorage) SetErrorLogger(logger ErrorLogger) {
 	rs.errorLogger = logger
@@ -361,6 +367,11 @@ func InitStorage(redisURL string, blockDuration time.Duration) Storage {
 // SetErrorLogger sets the error logger for MemoryStorage (no-op)
 func (ms *MemoryStorage) SetErrorLogger(logger ErrorLogger) {
 	// No-op for memory storage - it doesn't have Redis operations to log
+}
+
+// StorageType returns the storage type identifier
+func (ms *MemoryStorage) StorageType() string {
+	return "memory"
 }
 
 // GetBlockEventsCount returns the count of events in memory

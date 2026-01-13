@@ -4,6 +4,8 @@
 
 After approximately 40,000 requests or 1-2 days of operation, Ops Defender could experience memory pressure due to unbounded growth of the Redis `block_events` sorted set. This document explains the root cause, the fix, and how to monitor for similar issues.
 
+**Note:** This issue primarily affects Redis-based deployments. MemoryStorage has built-in limits (1000 events max) and self-manages its memory footprint.
+
 ## Root Causes
 
 ### 1. Redis Sorted Set Unbounded Growth
@@ -113,17 +115,25 @@ func (d *Defender) cleanupExpired() {
     for range ticker.C {
         // ... existing cleanup ...
         
-        // Health check: Monitor Redis sorted set size
+        // Health check: Monitor block events storage (storage-aware)
         if healthCheckable, ok := d.storage.(storage.HealthCheckable); ok {
             eventsCount, err := healthCheckable.GetBlockEventsCount(ctx)
             
-            if eventsCount > 10000 {
+            // Determine storage type and appropriate thresholds
+            storageType := d.storage.StorageType()
+            warnThreshold := int64(5000)     // Redis default
+            criticalThreshold := int64(10000) // Redis default
+            
+            if storageType == "memory" {
+                // MemoryStorage self-limits at 1000, adjust thresholds
+                warnThreshold = 800
+                criticalThreshold = 950
+            }
+            
+            if eventsCount > criticalThreshold {
                 // Critical: Attempt manual cleanup
-                removed, _ := healthCheckable.CleanupBlockEvents(ctx, 7*24*time.Hour)
-                // Log to file and stdout
-            } else if eventsCount > 5000 {
-                // Warning: Monitor threshold
-                log.Printf("INFO: Redis sorted set size: %d events", eventsCount)
+                // Logs include storage type for clarity
+                log.Printf("WARNING: Block events storage is large: %d events (type: %s)", eventsCount, storageType)
             }
         }
     }
@@ -131,9 +141,18 @@ func (d *Defender) cleanupExpired() {
 ```
 
 **Monitoring Thresholds:**
+
+**Redis Storage:**
 - **5,000 events:** Info-level warning (monitoring)
 - **10,000 events:** Critical alert + automatic cleanup attempt
-- **Cleanup:** Every 5 minutes, proactive health check
+
+**Memory Storage:**
+- **800 events:** Info-level warning (monitoring)  
+- **950 events:** Critical alert + automatic cleanup (near 1000 limit)
+- **1,000 events:** Hard limit enforced by MemoryStorage itself
+
+**Storage Type Detection:**
+New `StorageType()` method returns "redis" or "memory" for storage-aware monitoring.
 
 ### 4. Thread-Safe MemoryStorage
 
