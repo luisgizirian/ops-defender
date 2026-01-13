@@ -6,6 +6,7 @@ import (
 
 	"github.com/ops/defender/internal/config"
 	"github.com/ops/defender/internal/defender"
+	"github.com/ops/defender/internal/logger"
 	"github.com/ops/defender/internal/reporter"
 	"github.com/ops/defender/internal/storage"
 )
@@ -13,6 +14,16 @@ import (
 func main() {
 	// Load configuration
 	cfg := config.LoadConfig()
+
+	// Initialize error logger for persistent error tracking
+	errorLogger, err := logger.InitErrorLogger("")
+	if err != nil {
+		log.Printf("WARNING: Failed to initialize error logger: %v", err)
+		log.Println("Continuing without persistent error logging")
+	} else {
+		defer errorLogger.Close()
+		log.Printf("Error logging enabled: %s", errorLogger.GetFilePath())
+	}
 
 	// Initialize storage (Redis or Memory)
 	store := storage.InitStorage(cfg.RedisURL, cfg.BlockDuration)
@@ -26,6 +37,11 @@ func main() {
 		EvictionThresholdPct: cfg.EvictionThresholdPct,
 		SimulationMode:       cfg.SimulationMode,
 	})
+
+	// Set error logger on defender (will propagate to storage if Redis)
+	if errorLogger != nil {
+		def.SetErrorLogger(errorLogger)
+	}
 
 	// Start report scheduler
 	scheduler := reporter.NewReportScheduler(def, cfg)

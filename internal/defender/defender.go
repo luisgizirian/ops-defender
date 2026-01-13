@@ -75,6 +75,7 @@ type Defender struct {
 	simulationMode           bool                  // When true, log blocks but don't actually block requests
 	telemetry                *AppInsightsTelemetry // Azure Application Insights telemetry
 	eventStream              *EventStream          // Real-time event stream
+	errorLogger              storage.ErrorLogger   // File-based error logger for critical issues
 }
 
 func NewDefender(opts DefenderOptions) *Defender {
@@ -806,6 +807,39 @@ func (d *Defender) cleanupExpired() {
 			log.Printf("Cleanup completed: %d active IPs, %d cached blocked, %d total in storage",
 				inMemory, cachedBlocked, len(blockedIPs))
 		}
+
+		// Health check: Monitor Redis sorted set size if using Redis
+		if healthCheckable, ok := d.storage.(storage.HealthCheckable); ok {
+			eventsCount, err := healthCheckable.GetBlockEventsCount(ctx)
+			if err != nil {
+				if d.errorLogger != nil {
+					d.errorLogger.LogError("HEALTH_CHECK", "Failed to get block events count", err)
+				}
+			} else {
+				// Warn if sorted set is growing too large (>10,000 events)
+				if eventsCount > 10000 {
+					msg := fmt.Sprintf("Redis block_events sorted set is large: %d events (threshold: 10,000)", eventsCount)
+					log.Printf("WARNING: %s", msg)
+					if d.errorLogger != nil {
+						d.errorLogger.LogCritical("MEMORY_PRESSURE", msg, nil)
+					}
+
+					// Attempt manual cleanup of events older than 7 days
+					removed, cleanupErr := healthCheckable.CleanupBlockEvents(ctx, 7*24*time.Hour)
+					if cleanupErr != nil {
+						if d.errorLogger != nil {
+							d.errorLogger.LogCritical("CLEANUP_FAILED", 
+								fmt.Sprintf("Manual cleanup failed, sorted set size: %d", eventsCount), cleanupErr)
+						}
+					} else if removed > 0 {
+						log.Printf("Manual cleanup: Removed %d old events, remaining: %d", removed, eventsCount-removed)
+					}
+				} else if eventsCount > 5000 {
+					// Info-level warning at 5000 events
+					log.Printf("INFO: Redis block_events sorted set size: %d events (monitoring threshold)", eventsCount)
+				}
+			}
+		}
 	}
 }
 
@@ -821,6 +855,18 @@ func (d *Defender) SetEventStream(eventStream *EventStream) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.eventStream = eventStream
+}
+
+// SetErrorLogger sets the error logger for critical issues
+func (d *Defender) SetErrorLogger(logger storage.ErrorLogger) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.errorLogger = logger
+
+	// Also set it on storage if it supports health checking
+	if healthCheckable, ok := d.storage.(storage.HealthCheckable); ok {
+		healthCheckable.SetErrorLogger(logger)
+	}
 }
 
 type Stats struct {
