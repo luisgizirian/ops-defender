@@ -54,30 +54,30 @@ From the [Nginx documentation](http://nginx.org/en/docs/http/ngx_http_auth_reque
 
 ```bash
 # Direct test to Ops Defender
-$ curl -I -H "X-Real-IP: 52.5.242.243" \
+$ curl -I -H "X-Real-IP: 10.0.2.243" \
        -H "X-Original-URI: /cuenta/crear?returnUrl=.../returnUrl%25253D/..." \
        https://defender-url/check
 HTTP/1.1 404 Not Found  # ❌ Wrong status code
 
 # Ops Defender logs (blocking was working)
-DEBUG: IP=146.120.231.15, URI=/cuenta/ingresar?returnUrl=..., HasNesting=true
-BLOCKED (immediate): IP 146.120.231.15 - excessive nesting on first request
+DEBUG: IP=10.0.3.15, URI=/cuenta/ingresar?returnUrl=..., HasNesting=true
+BLOCKED (immediate): IP 10.0.3.15 - excessive nesting on first request
 
 # Nginx logs (backend still crashed)
-52.5.242.243 - GET /cuenta/crear?returnUrl=.../returnUrl%25253D/... HTTP/1.1 500  # ❌
+10.0.2.243 - GET /cuenta/crear?returnUrl=.../returnUrl%25253D/... HTTP/1.1 500  # ❌
 ```
 
 ### After Fix (403 Status)
 
 ```bash
 # Direct test to Ops Defender
-$ curl -I -H "X-Real-IP: 52.5.242.243" \
+$ curl -I -H "X-Real-IP: 10.0.2.243" \
        -H "X-Original-URI: /cuenta/crear?returnUrl=.../returnUrl%25253D/..." \
        https://defender-url/check
 HTTP/1.1 403 Forbidden  # ✅ Correct status code
 
 # Nginx logs (request blocked by Nginx)
-52.5.242.243 - GET /cuenta/crear?returnUrl=.../returnUrl%25253D/... HTTP/1.1 403  # ✅
+10.0.2.243 - GET /cuenta/crear?returnUrl=.../returnUrl%25253D/... HTTP/1.1 403  # ✅
 ```
 
 ## Solution
@@ -157,7 +157,7 @@ server {
 
 ```bash
 # Should return 403 for malicious URI
-curl -I -H "X-Real-IP: 1.2.3.4" \
+curl -I -H "X-Real-IP: 10.0.0.4" \
      -H "X-Original-URI: /cuenta/crear?returnUrl=/cuenta/crear?returnUrl%3D/cuenta/ingresar?returnUrl%253D/cuenta/crear?returnUrl%25253D/productos" \
      http://your-defender:8080/check
 
@@ -181,10 +181,10 @@ nginx -T | grep -B 10 -A 10 "error_page.*403"
 tail -f /var/log/nginx/access.log | grep "returnUrl%25253D"
 
 # Expected (after fix):
-# 52.5.242.243 - GET /cuenta/crear?returnUrl=.../returnUrl%25253D/... HTTP/1.1 403
+# 10.0.2.243 - GET /cuenta/crear?returnUrl=.../returnUrl%25253D/... HTTP/1.1 403
 
 # Before fix:
-# 52.5.242.243 - GET /cuenta/crear?returnUrl=.../returnUrl%25253D/... HTTP/1.1 500
+# 10.0.2.243 - GET /cuenta/crear?returnUrl=.../returnUrl%25253D/... HTTP/1.1 500
 ```
 
 ### 4. Run Test Suite

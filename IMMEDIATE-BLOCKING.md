@@ -36,9 +36,9 @@ Real-world logs showed a sustained attack using nested `returnUrl` parameters wi
 From production logs (January 11, 2026, 17:06-17:13):
 
 ```
-18.213.70.100   - GET /cuenta/crear?returnUrl=.../returnUrl%25253D/... HTTP/1.1  500 588
-184.73.195.18   - GET /cuenta/crear?returnUrl=.../returnUrl%25253D/... HTTP/1.1  500 588
-100.28.57.133   - GET /cuenta/crear?returnUrl=.../returnUrl%25253D/... HTTP/1.1  500 588
+10.0.1.100   - GET /cuenta/crear?returnUrl=.../returnUrl%25253D/... HTTP/1.1  500 588
+10.0.1.101   - GET /cuenta/crear?returnUrl=.../returnUrl%25253D/... HTTP/1.1  500 588
+10.0.1.102   - GET /cuenta/crear?returnUrl=.../returnUrl%25253D/... HTTP/1.1  500 588
 ```
 
 **Problems:**
@@ -212,18 +212,18 @@ if d.hasExcessiveNestingFast(uri) {
 ### Before Fix (From Real Logs)
 
 ```
-18.213.70.100 - returnUrl%253D...%25253D - HTTP 500  ← Backend crash
-184.73.195.18 - returnUrl%253D...%25253D - HTTP 200  ← Allowed through
-100.28.57.133 - returnUrl%253D...%25253D - HTTP 500  ← Backend crash
+10.0.1.100 - returnUrl%253D...%25253D - HTTP 500  ← Backend crash
+10.0.1.101 - returnUrl%253D...%25253D - HTTP 200  ← Allowed through
+10.0.1.102 - returnUrl%253D...%25253D - HTTP 500  ← Backend crash
 ```
 
 ### After Fix (Expected)
 
 ```
-18.213.70.100 - returnUrl%253D...%25253D - HTTP 403  ← Blocked immediately
-18.213.70.100 - /any/other/path         - HTTP 403  ← Cached block (200ns)
-184.73.195.18 - returnUrl%253D...%25253D - HTTP 403  ← Blocked immediately
-100.28.57.133 - returnUrl%253D...%25253D - HTTP 403  ← Blocked immediately
+10.0.1.100 - returnUrl%253D...%25253D - HTTP 403  ← Blocked immediately
+10.0.1.100 - /any/other/path         - HTTP 403  ← Cached block (200ns)
+10.0.1.101 - returnUrl%253D...%25253D - HTTP 403  ← Blocked immediately
+10.0.1.102 - returnUrl%253D...%25253D - HTTP 403  ← Blocked immediately
 ```
 
 **Zero HTTP 500 errors** - malicious requests never reach backend.
@@ -292,7 +292,7 @@ curl http://localhost:8080/stats | jq '.blocked_ips'
 New log format for immediate blocks:
 
 ```
-BLOCKED (immediate): IP 18.213.70.100 - excessive nesting on first request: /cuenta/crear?returnUrl=.../returnUrl%25253D/...
+BLOCKED (immediate): IP 10.0.1.100 - excessive nesting on first request: /cuenta/crear?returnUrl=.../returnUrl%25253D/...
 ```
 
 Distinguishable from deferred blocks:
@@ -378,18 +378,17 @@ No new environment variables required. Existing settings apply:
 
 **Evidence from Production (January 12, 2026):**
 ```bash
-# Test showed 404 response:
-curl -I -H "X-Real-IP: 52.5.242.243" \
+curl -I -H "X-Real-IP: 10.0.2.243" \
      -H "X-Original-URI: /cuenta/crear?returnUrl=.../returnUrl%25253D/..." \
      https://defender-url/check
 HTTP/1.1 404 Not Found  # ← Should be 403!
 
 # Logs showed blocking was working:
-DEBUG: IP=146.120.231.15, URI=/cuenta/ingresar?returnUrl=..., HasNesting=true
-BLOCKED (immediate): IP 146.120.231.15 - excessive nesting on first request
+DEBUG: IP=10.0.3.15, URI=/cuenta/ingresar?returnUrl=..., HasNesting=true
+BLOCKED (immediate): IP 10.0.3.15 - excessive nesting on first request
 
 # But Nginx logs showed 500:
-52.5.242.243 - returnUrl%25253D... - HTTP 500  # ← Backend crash
+10.0.2.243 - returnUrl%25253D... - HTTP 500  # ← Backend crash
 ```
 
 **Fix Applied:**
@@ -412,7 +411,7 @@ curl -I ... https://defender-url/check
 HTTP/1.1 403 Forbidden  # ✓ Correct
 
 # Nginx logs show 403 (not 500):
-52.5.242.243 - returnUrl%25253D... - HTTP 403  # ✓ Blocked by Nginx
+10.0.2.243 - returnUrl%25253D... - HTTP 403  # ✓ Blocked by Nginx
 ```
 
 ### Issue: Nginx `error_page 403` Not Working
@@ -472,7 +471,7 @@ server {
 **1. Test Ops Defender directly:**
 ```bash
 # Should return 403 for malicious URI
-curl -I -H "X-Real-IP: 1.2.3.4" \
+curl -I -H "X-Real-IP: 10.0.0.4" \
      -H "X-Original-URI: /cuenta/crear?returnUrl=/cuenta/crear?returnUrl%3D/cuenta/ingresar?returnUrl%253D/cuenta/crear?returnUrl%25253D/productos" \
      http://your-defender:8080/check
      
@@ -493,7 +492,7 @@ nginx -T | grep -B 10 -A 10 "error_page.*403"
 tail -f /var/log/nginx/access.log | grep "returnUrl%25253D"
 
 # Expected:
-# 52.5.242.243 - GET /cuenta/crear?returnUrl=.../returnUrl%25253D/... HTTP/1.1 403
+# 10.0.2.243 - GET /cuenta/crear?returnUrl=.../returnUrl%25253D/... HTTP/1.1 403
 ```
 
 **4. Check Ops Defender debug logs:**

@@ -994,16 +994,16 @@ watch -n 1 'curl -s http://localhost:8080/stats | jq'
 
 # 2. Simulate HTTP flood from single IP (should be blocked)
 for i in {1..20}; do
-  curl -H "X-Real-IP: 203.0.113.50" \
+  curl -H "X-Real-IP: 10.0.113.50" \
        -H "X-Original-URI: /api/data" \
        http://localhost:8080/check
 done
 
 # 3. Check if IP was blocked
-curl http://localhost:8080/stats | jq '.top_ips[] | select(.ip == "203.0.113.50")'
+curl http://localhost:8080/stats | jq '.top_ips[] | select(.ip == "10.0.113.50")'
 
 # 4. Verify subsequent requests blocked
-curl -H "X-Real-IP: 203.0.113.50" \
+curl -H "X-Real-IP: 10.0.113.50" \
      -H "X-Original-URI: /any/path" \
      http://localhost:8080/check
 # Should return 404

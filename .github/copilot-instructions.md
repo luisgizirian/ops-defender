@@ -784,8 +784,8 @@ if strings.Contains(strings.ToLower(uri), "returnurl") {
 
 Expected output:
 ```
-DEBUG: IP=1.2.3.4, URI=/cuenta/crear?returnUrl=.../returnUrl%25253D/..., HasNesting=true
-BLOCKED (immediate): IP 1.2.3.4 - excessive nesting on first request
+DEBUG: IP=10.0.0.4, URI=/cuenta/crear?returnUrl=.../returnUrl%25253D/..., HasNesting=true
+BLOCKED (immediate): IP 10.0.0.4 - excessive nesting on first request
 ```
 
 If `HasNesting=false` but URI clearly has nesting, check:

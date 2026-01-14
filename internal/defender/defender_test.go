@@ -434,7 +434,7 @@ func TestDefender_BulkEviction_LRU_Order(t *testing.T) {
 
 	// Trigger bulk eviction by adding a new IP
 	req := httptest.NewRequest("GET", "/test", nil)
-	req.Header.Set("X-Real-IP", "203.0.113.99")
+	req.Header.Set("X-Real-IP", "10.0.113.99")
 	req.Header.Set("X-Original-URI", "/normal-path")
 	w := httptest.NewRecorder()
 	defender.CheckRequest(w, req)
