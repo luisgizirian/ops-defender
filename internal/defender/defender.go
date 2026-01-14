@@ -68,12 +68,17 @@ type Defender struct {
 	excessiveNestingBlocks   int64                 // Counter for blocks due to excessive URL-encoded nesting
 	suspiciousBlocks         int64                 // Counter for blocks due to suspicious patterns
 	repeatBlockedRequests    int64                 // Counter for requests from already-blocked IPs (cached blocks)
+	identicalURIBlocks       int64                 // Counter for blocks due to identical URI repetition
+	burstPatternBlocks       int64                 // Counter for blocks due to burst patterns
+	subnetBlocks             int64                 // Counter for subnet-level blocks
 	maxTrackedIPs            int                   // Maximum number of IPs to track simultaneously
 	droppedIPs               int64                 // Counter for IPs dropped due to memory limits
 	evictionBatchPct         float64               // Percentage of IPs to evict in bulk (default 0.10 = 10%)
 	evictionInProgress       bool                  // Flag to prevent concurrent evictions
 	evictionThreshold        int                   // Preemptive eviction threshold (e.g., 90% of max)
 	simulationMode           bool                  // When true, log blocks but don't actually block requests
+	subnetViolations         map[string]int        // Track how many IPs per /24 subnet have been blocked
+	blockedSubnets           map[string]time.Time  // Blocked /24 subnets (CIDR -> expiry time)
 	telemetry                *AppInsightsTelemetry // Azure Application Insights telemetry
 	eventStream              *EventStream          // Real-time event stream
 	errorLogger              storage.ErrorLogger   // File-based error logger for critical issues
@@ -105,6 +110,8 @@ func NewDefender(opts DefenderOptions) *Defender {
 	d := &Defender{
 		ipTrackers:         make(map[string]*IPTracker),
 		blockedCache:       make(map[string]time.Time),
+		subnetViolations:   make(map[string]int),
+		blockedSubnets:     make(map[string]time.Time),
 		storage:            opts.Storage,
 		analysisThreshold:  opts.AnalysisThreshold,
 		blockDuration:      opts.BlockDuration,
@@ -223,6 +230,24 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 	d.mu.Lock()
 	d.totalRequests++
 	d.mu.Unlock()
+
+	// SUBNET CHECK: Block entire /24 subnets if previously flagged
+	subnet := d.extractSubnet(ip)
+	if subnet != "" {
+		d.mu.RLock()
+		if expiresAt, blocked := d.blockedSubnets[subnet]; blocked && time.Now().Before(expiresAt) {
+			d.mu.RUnlock()
+			d.mu.Lock()
+			d.blockedRequests++
+			d.repeatBlockedRequests++
+			d.mu.Unlock()
+
+			log.Printf("DEBUG: Subnet %s blocked, rejecting IP %s: %s", subnet, ip, uri)
+			d.handleBlockedRequest(w, ip, uri, "subnet")
+			return
+		}
+		d.mu.RUnlock()
+	}
 
 	// OPTIMIZATION: Check blockedCache FIRST before any expensive pattern matching
 	// This catches repeat requests from already-blocked IPs (~100ns vs ~1150ns for hasExcessiveNestingFast)
@@ -512,6 +537,37 @@ func (d *Defender) analyzeIP(ip string) {
 		}
 	}
 
+	// Check for identical URI repetition (automation detection)
+	if !suspicious {
+		uriCounts := make(map[string]int)
+		for _, reqLog := range tracker.RequestLogs {
+			if !reqLog.IsWhitelisted {
+				uriCounts[reqLog.URI]++
+			}
+		}
+
+		for uri, count := range uriCounts {
+			if count >= 4 {
+				suspicious = true
+				suspiciousURI = uri
+				reason = fmt.Sprintf("Identical URI repeated %d times (automation detected)", count)
+				log.Printf("Identical URI pattern detected for %s: %d repetitions of %s", ip, count, uri)
+				d.identicalURIBlocks++
+				break
+			}
+		}
+	}
+
+	// Check for sliding window burst patterns
+	if !suspicious {
+		if d.hasConsecutiveBurst(tracker.RequestLogs, 3, 5*time.Second) {
+			suspicious = true
+			reason = "Burst pattern detected (3+ requests in 5 seconds)"
+			log.Printf("Burst pattern detected for %s: consecutive requests in tight window", ip)
+			d.burstPatternBlocks++
+		}
+	}
+
 	if suspicious {
 		tracker.Blocked = true
 		tracker.BlockedAt = time.Now()
@@ -560,6 +616,41 @@ func (d *Defender) analyzeIP(ip string) {
 		// Broadcast to real-time event stream
 		if d.eventStream != nil {
 			d.eventStream.BroadcastBlockEvent(ip, reason, suspiciousURI)
+		}
+
+		// Subnet-level blocking: Track subnet violations and auto-block after threshold
+		subnet := d.extractSubnet(ip)
+		if subnet != "" {
+			d.mu.Lock()
+			d.subnetViolations[subnet]++
+			violationCount := d.subnetViolations[subnet]
+			d.mu.Unlock()
+
+			// Block entire /24 subnet after 3 IPs from same subnet are blocked
+			if violationCount >= 3 {
+				d.mu.Lock()
+				if _, alreadyBlocked := d.blockedSubnets[subnet]; !alreadyBlocked {
+					d.blockedSubnets[subnet] = time.Now().Add(d.blockDuration)
+					d.subnetBlocks++
+					d.mu.Unlock()
+					log.Printf("SUBNET BLOCKED: %s after %d violations (IPs: %s and others)",
+						subnet, violationCount, ip)
+
+					// Record subnet block event
+					subnetEvent := storage.BlockEvent{
+						IP:            subnet,
+						BlockedAt:     time.Now(),
+						Reason:        fmt.Sprintf("Subnet-level block after %d violations", violationCount),
+						SuspiciousURI: suspiciousURI,
+						RequestCount:  violationCount,
+					}
+					if err := d.storage.RecordBlockEvent(ctx, subnetEvent); err != nil {
+						log.Printf("Failed to record subnet block event: %v", err)
+					}
+				} else {
+					d.mu.Unlock()
+				}
+			}
 		}
 
 		if d.simulationMode {
@@ -662,6 +753,55 @@ func (d *Defender) extractIP(r *http.Request) string {
 
 	// If SplitHostPort fails, return RemoteAddr as-is (edge case)
 	return r.RemoteAddr
+}
+
+// extractSubnet extracts the /24 subnet from an IP address
+// Returns empty string for invalid IPs or IPv6 (not implemented for IPv6 yet)
+func (d *Defender) extractSubnet(ip string) string {
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		return ""
+	}
+
+	// Only handle IPv4 for now (future: add IPv6 /64 subnet support)
+	ipv4 := parsedIP.To4()
+	if ipv4 == nil {
+		return "" // IPv6 - skip for now
+	}
+
+	// Extract /24 subnet (first 3 octets)
+	return fmt.Sprintf("%d.%d.%d.0/24", ipv4[0], ipv4[1], ipv4[2])
+}
+
+// hasConsecutiveBurst checks if there are N consecutive requests within maxDuration
+// Used to detect burst patterns that indicate automation
+func (d *Defender) hasConsecutiveBurst(logs []RequestLog, consecutive int, maxDuration time.Duration) bool {
+	if len(logs) < consecutive {
+		return false
+	}
+
+	// Count only non-whitelisted requests
+	nonWhitelisted := make([]RequestLog, 0, len(logs))
+	for _, log := range logs {
+		if !log.IsWhitelisted {
+			nonWhitelisted = append(nonWhitelisted, log)
+		}
+	}
+
+	if len(nonWhitelisted) < consecutive {
+		return false
+	}
+
+	// Check sliding window for any burst
+	for i := 0; i <= len(nonWhitelisted)-consecutive; i++ {
+		window := nonWhitelisted[i : i+consecutive]
+		duration := window[len(window)-1].Timestamp.Sub(window[0].Timestamp)
+		if duration < maxDuration {
+			return true
+		}
+	}
+
+	return false
 }
 
 // evictBulkIPsSync evicts a batch of oldest IPs (LRU) synchronously

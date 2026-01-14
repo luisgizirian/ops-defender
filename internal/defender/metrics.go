@@ -22,6 +22,10 @@ func (d *Defender) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	whitelistedRequests := d.whitelistedRequests
 	pathTraversalBlocks := d.pathTraversalBlocks
 	suspiciousBlocks := d.suspiciousBlocks
+	identicalURIBlocks := d.identicalURIBlocks
+	burstPatternBlocks := d.burstPatternBlocks
+	subnetBlocks := d.subnetBlocks
+	blockedSubnetsCount := len(d.blockedSubnets)
 	maxTrackedIPs := d.maxTrackedIPs
 	droppedIPs := d.droppedIPs
 	d.mu.RUnlock()
@@ -67,6 +71,22 @@ func (d *Defender) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "# HELP ops_defender_suspicious_pattern_blocks Total number of blocks due to suspicious patterns\n")
 	fmt.Fprintf(w, "# TYPE ops_defender_suspicious_pattern_blocks counter\n")
 	fmt.Fprintf(w, "ops_defender_suspicious_pattern_blocks %d\n\n", suspiciousBlocks)
+
+	fmt.Fprintf(w, "# HELP ops_defender_identical_uri_blocks Total number of blocks due to identical URI repetition\n")
+	fmt.Fprintf(w, "# TYPE ops_defender_identical_uri_blocks counter\n")
+	fmt.Fprintf(w, "ops_defender_identical_uri_blocks %d\n\n", identicalURIBlocks)
+
+	fmt.Fprintf(w, "# HELP ops_defender_burst_pattern_blocks Total number of blocks due to burst patterns\n")
+	fmt.Fprintf(w, "# TYPE ops_defender_burst_pattern_blocks counter\n")
+	fmt.Fprintf(w, "ops_defender_burst_pattern_blocks %d\n\n", burstPatternBlocks)
+
+	fmt.Fprintf(w, "# HELP ops_defender_subnet_blocks Total number of subnet-level blocks\n")
+	fmt.Fprintf(w, "# TYPE ops_defender_subnet_blocks counter\n")
+	fmt.Fprintf(w, "ops_defender_subnet_blocks %d\n\n", subnetBlocks)
+
+	fmt.Fprintf(w, "# HELP ops_defender_blocked_subnets Number of currently blocked subnets\n")
+	fmt.Fprintf(w, "# TYPE ops_defender_blocked_subnets gauge\n")
+	fmt.Fprintf(w, "ops_defender_blocked_subnets %d\n\n", blockedSubnetsCount)
 
 	fmt.Fprintf(w, "# HELP ops_defender_active_ips Number of actively tracked IPs\n")
 	fmt.Fprintf(w, "# TYPE ops_defender_active_ips gauge\n")
