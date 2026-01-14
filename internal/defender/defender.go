@@ -218,6 +218,11 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	userAgent := r.Header.Get("User-Agent")
 
+	// Increment total requests at the very start (before any blocking logic)
+	d.mu.Lock()
+	d.totalRequests++
+	d.mu.Unlock()
+
 	// DEBUG: Log URIs with returnUrl to diagnose pattern matching
 	if strings.Contains(strings.ToLower(uri), "returnurl") {
 		log.Printf("DEBUG: IP=%s, URI=%s, HasNesting=%v", ip, uri, d.hasExcessiveNestingFast(uri))
@@ -395,7 +400,7 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 
 	requestCount := len(tracker.RequestLogs)
 	analysisCount := tracker.AnalysisCount
-	d.totalRequests++
+	// totalRequests is now incremented at the start of CheckRequest()
 	d.mu.Unlock()
 
 	// Check for excessive URL-encoded nesting outside critical section (regex matching can be expensive)
