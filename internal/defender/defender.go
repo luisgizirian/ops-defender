@@ -67,6 +67,7 @@ type Defender struct {
 	pathTraversalBlocks      int64                 // Counter for blocks due to path traversal
 	excessiveNestingBlocks   int64                 // Counter for blocks due to excessive URL-encoded nesting
 	suspiciousBlocks         int64                 // Counter for blocks due to suspicious patterns
+	repeatBlockedRequests    int64                 // Counter for requests from already-blocked IPs (cached blocks)
 	maxTrackedIPs            int                   // Maximum number of IPs to track simultaneously
 	droppedIPs               int64                 // Counter for IPs dropped due to memory limits
 	evictionBatchPct         float64               // Percentage of IPs to evict in bulk (default 0.10 = 10%)
@@ -223,6 +224,26 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 	d.totalRequests++
 	d.mu.Unlock()
 
+	// OPTIMIZATION: Check blockedCache FIRST before any expensive pattern matching
+	// This catches repeat requests from already-blocked IPs (~100ns vs ~1150ns for hasExcessiveNestingFast)
+	d.mu.RLock()
+	if expiresAt, blocked := d.blockedCache[ip]; blocked && time.Now().Before(expiresAt) {
+		d.mu.RUnlock()
+		d.mu.Lock()
+		d.blockedRequests++
+		d.repeatBlockedRequests++
+		d.mu.Unlock()
+
+		// DEBUG: Log repeat blocks from cached IPs with nesting patterns
+		if strings.Contains(strings.ToLower(uri), "returnurl") {
+			log.Printf("DEBUG: IP %s already blocked (cache), blocking repeat request: %s", ip, uri)
+		}
+
+		d.handleBlockedRequest(w, ip, uri, "cache")
+		return
+	}
+	d.mu.RUnlock()
+
 	// DEBUG: Log URIs with returnUrl to diagnose pattern matching
 	if strings.Contains(strings.ToLower(uri), "returnurl") {
 		log.Printf("DEBUG: IP=%s, URI=%s, HasNesting=%v", ip, uri, d.hasExcessiveNestingFast(uri))
@@ -231,21 +252,22 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 	// IMMEDIATE CHECK: Block excessive nesting BEFORE logging (unforgiving)
 	// This prevents the first malicious request from reaching the backend
 	if d.hasExcessiveNestingFast(uri) {
-		// Check if already blocked (avoid duplicate blocking)
-		d.mu.RLock()
+		// ATOMIC CHECK-AND-SET: Use single Lock to prevent race condition
+		// This ensures concurrent requests can't all pass the "already blocked?" check
+		d.mu.Lock()
 		if expiresAt, blocked := d.blockedCache[ip]; blocked && time.Now().Before(expiresAt) {
-			d.mu.RUnlock()
-			d.mu.Lock()
+			// Already blocked - increment counters and return
 			d.blockedRequests++
+			d.repeatBlockedRequests++
 			d.mu.Unlock()
+
+			log.Printf("DEBUG: IP %s already blocked (immediate-nesting), blocking repeat request: %s", ip, uri)
 			d.handleBlockedRequest(w, ip, uri, "cache-nesting")
 			return
 		}
-		d.mu.RUnlock()
 
-		// First detection - block immediately
+		// First detection - block immediately (still holding lock)
 		expiresAt := time.Now().Add(d.blockDuration)
-		d.mu.Lock()
 		d.blockedCache[ip] = expiresAt
 		d.excessiveNestingBlocks++
 		d.blockedRequests++
@@ -287,29 +309,7 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fast path 1: Check in-memory blocked cache first (no I/O)
-	d.mu.RLock()
-	if expiresAt, blocked := d.blockedCache[ip]; blocked {
-		// Check if still valid
-		if time.Now().Before(expiresAt) {
-			d.mu.RUnlock()
-			d.mu.Lock()
-			d.blockedRequests++
-			d.mu.Unlock()
-
-			d.handleBlockedRequest(w, ip, uri, "cache")
-			return
-		}
-		// Expired, remove from cache
-		d.mu.RUnlock()
-		d.mu.Lock()
-		delete(d.blockedCache, ip)
-		d.mu.Unlock()
-		d.mu.RLock()
-	}
-	d.mu.RUnlock()
-
-	// Fast path 2: Check if actively tracking this IP
+	// Fast path: Check if actively tracking this IP
 	d.mu.RLock()
 	tracker, exists := d.ipTrackers[ip]
 	d.mu.RUnlock()
@@ -652,16 +652,16 @@ func (d *Defender) extractIP(r *http.Request) string {
 			return strings.TrimSpace(ips[0])
 		}
 	}
-  
-  	// Fallback to remote address - use net.SplitHostPort for proper IPv4/IPv6 handling
+
+	// Fallback to remote address - use net.SplitHostPort for proper IPv4/IPv6 handling
 	// RemoteAddr format: "IP:port" for IPv4 or "[IPv6]:port" for IPv6
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err == nil {
 		return host
 	}
-	
+
 	// If SplitHostPort fails, return RemoteAddr as-is (edge case)
-  	return r.RemoteAddr
+	return r.RemoteAddr
 }
 
 // evictBulkIPsSync evicts a batch of oldest IPs (LRU) synchronously
@@ -826,7 +826,7 @@ func (d *Defender) cleanupExpired() {
 				storageType := d.storage.StorageType()
 				warnThreshold := int64(5000)
 				criticalThreshold := int64(10000)
-				
+
 				if storageType == "memory" {
 					// MemoryStorage: adjust thresholds (it self-limits at 1000)
 					warnThreshold = 800
@@ -845,7 +845,7 @@ func (d *Defender) cleanupExpired() {
 					removed, cleanupErr := healthCheckable.CleanupBlockEvents(ctx, 7*24*time.Hour)
 					if cleanupErr != nil {
 						if d.errorLogger != nil {
-							d.errorLogger.LogCritical("CLEANUP_FAILED", 
+							d.errorLogger.LogCritical("CLEANUP_FAILED",
 								fmt.Sprintf("Manual cleanup failed, storage size: %d", eventsCount), cleanupErr)
 						}
 					} else if removed > 0 {

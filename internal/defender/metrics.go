@@ -18,6 +18,7 @@ func (d *Defender) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	activeIPs := len(d.ipTrackers)
 	totalRequests := d.totalRequests
 	blockedRequests := d.blockedRequests
+	repeatBlockedRequests := d.repeatBlockedRequests
 	whitelistedRequests := d.whitelistedRequests
 	pathTraversalBlocks := d.pathTraversalBlocks
 	suspiciousBlocks := d.suspiciousBlocks
@@ -50,6 +51,10 @@ func (d *Defender) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "# HELP ops_defender_blocked_requests Total number of blocked requests\n")
 	fmt.Fprintf(w, "# TYPE ops_defender_blocked_requests counter\n")
 	fmt.Fprintf(w, "ops_defender_blocked_requests %d\n\n", blockedRequests)
+
+	fmt.Fprintf(w, "# HELP ops_defender_repeat_blocked_requests Number of requests from already-blocked IPs (cached blocks)\n")
+	fmt.Fprintf(w, "# TYPE ops_defender_repeat_blocked_requests counter\n")
+	fmt.Fprintf(w, "ops_defender_repeat_blocked_requests %d\n\n", repeatBlockedRequests)
 
 	fmt.Fprintf(w, "# HELP ops_defender_whitelisted_requests Total number of whitelisted static asset requests\n")
 	fmt.Fprintf(w, "# TYPE ops_defender_whitelisted_requests counter\n")
