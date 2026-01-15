@@ -1089,7 +1089,9 @@ See [DDOS-DEFENSE.md](DDOS-DEFENSE.md) for detailed analysis of DDoS protection 
 
 ### Test 11 (test-attacks.sh) Fails - Expected Behavior
 
-**Symptom:** Test 11 "Legitimate Request" returns 403/404 when accessing `/api/users`
+**Symptom:** Test 11 "Legitimate Request" returns 403 when accessing `/api/users`
+**Note: When forwarding requests to Ops Defender, the request body is excluded.
+
 
 **Explanation:** This is **not a bug**. Ops Defender is an auth validation service, not an application server. It only implements:
 - `/check` - Auth validation endpoint (for Nginx)
