@@ -88,6 +88,7 @@ func (es *EventStream) sendStatsUpdate() {
 	activeIPs := len(es.defender.ipTrackers)
 	totalRequests := es.defender.totalRequests
 	blockedRequests := es.defender.blockedRequests
+	repeatBlockedRequests := es.defender.repeatBlockedRequests
 	droppedIPs := es.defender.droppedIPs
 	es.defender.mu.RUnlock()
 
@@ -102,11 +103,12 @@ func (es *EventStream) sendStatsUpdate() {
 		Type:      "stats_update",
 		Timestamp: time.Now(),
 		Data: map[string]interface{}{
-			"active_ips":       activeIPs,
-			"blocked_ips":      blockedIPCount,
-			"total_requests":   totalRequests,
-			"blocked_requests": blockedRequests,
-			"dropped_ips":      droppedIPs,
+			"active_ips":              activeIPs,
+			"blocked_ips":             blockedIPCount,
+			"total_requests":          totalRequests,
+			"blocked_requests":        blockedRequests,
+			"repeat_blocked_requests": repeatBlockedRequests,
+			"dropped_ips":             droppedIPs,
 		},
 	}
 

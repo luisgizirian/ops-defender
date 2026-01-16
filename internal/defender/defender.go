@@ -23,6 +23,113 @@ const (
 	evictionTimeout = 50 * time.Millisecond
 )
 
+// DefenseFeature represents individual defense capabilities (bitfield enum)
+type DefenseFeature int32
+
+const (
+	FeatureSubnetBlocking   DefenseFeature = 1 << iota // Subnet-level /24 blocking
+	FeatureIdenticalURI                                // Identical URI repetition detection
+	FeatureBurstDetection                              // Sliding window burst pattern detection
+	FeaturePathTraversal                               // Path traversal attempts (../, ..\)
+	FeatureExcessiveNesting                            // Excessive URL-encoded nesting (returnUrl)
+	FeatureSQLInjection                                // SQL injection patterns
+	FeatureXSS                                         // Cross-site scripting attempts
+	FeatureOpenRedirect                                // Open redirect vulnerabilities
+	FeatureFileAccess                                  // Sensitive file access (.env, .git, config)
+	FeatureAdminScanning                               // Admin panel and CMS scanning
+)
+
+// String returns human-readable feature name
+func (f DefenseFeature) String() string {
+	features := []string{}
+	if f&FeatureSubnetBlocking != 0 {
+		features = append(features, "subnet-blocking")
+	}
+	if f&FeatureIdenticalURI != 0 {
+		features = append(features, "identical-uri")
+	}
+	if f&FeatureBurstDetection != 0 {
+		features = append(features, "burst-detection")
+	}
+	if f&FeaturePathTraversal != 0 {
+		features = append(features, "path-traversal")
+	}
+	if f&FeatureExcessiveNesting != 0 {
+		features = append(features, "excessive-nesting")
+	}
+	if f&FeatureSQLInjection != 0 {
+		features = append(features, "sql-injection")
+	}
+	if f&FeatureXSS != 0 {
+		features = append(features, "xss")
+	}
+	if f&FeatureOpenRedirect != 0 {
+		features = append(features, "open-redirect")
+	}
+	if f&FeatureFileAccess != 0 {
+		features = append(features, "file-access")
+	}
+	if f&FeatureAdminScanning != 0 {
+		features = append(features, "admin-scanning")
+	}
+	if len(features) == 0 {
+		return "none"
+	}
+	return strings.Join(features, ",")
+}
+
+// ParseDefenseFeatures converts comma-separated string to bitfield
+// Example: "subnet-blocking,burst-detection" -> FeatureSubnetBlocking | FeatureBurstDetection
+// Special value "all" enables all features for backward compatibility
+func ParseDefenseFeatures(s string) (DefenseFeature, error) {
+	if s == "" || s == "none" {
+		return 0, nil // No features enabled
+	}
+
+	// Special case: enable all features
+	if s == "all" {
+		return FeatureSubnetBlocking | FeatureIdenticalURI | FeatureBurstDetection |
+			FeaturePathTraversal | FeatureExcessiveNesting | FeatureSQLInjection |
+			FeatureXSS | FeatureOpenRedirect | FeatureFileAccess | FeatureAdminScanning, nil
+	}
+
+	var features DefenseFeature
+	parts := strings.Split(s, ",")
+
+	for _, part := range parts {
+		part = strings.TrimSpace(strings.ToLower(part))
+		switch part {
+		case "subnet-blocking":
+			features |= FeatureSubnetBlocking
+		case "identical-uri":
+			features |= FeatureIdenticalURI
+		case "burst-detection":
+			features |= FeatureBurstDetection
+		case "path-traversal":
+			features |= FeaturePathTraversal
+		case "excessive-nesting":
+			features |= FeatureExcessiveNesting
+		case "sql-injection":
+			features |= FeatureSQLInjection
+		case "xss":
+			features |= FeatureXSS
+		case "open-redirect":
+			features |= FeatureOpenRedirect
+		case "file-access":
+			features |= FeatureFileAccess
+		case "admin-scanning":
+			features |= FeatureAdminScanning
+		case "":
+			// Ignore empty parts (trailing commas, etc.)
+			continue
+		default:
+			return 0, fmt.Errorf("unknown defense feature: %q (valid: subnet-blocking, identical-uri, burst-detection, path-traversal, excessive-nesting, sql-injection, xss, open-redirect, file-access, admin-scanning, all)", part)
+		}
+	}
+
+	return features, nil
+}
+
 type RequestLog struct {
 	URI           string
 	Timestamp     time.Time
@@ -46,6 +153,7 @@ type DefenderOptions struct {
 	EvictionBatchPct     float64         // Percentage of IPs to evict in bulk (0.01-1.0, default 0.10)
 	EvictionThresholdPct float64         // Preemptive eviction threshold (0.5-1.0, default 0.93)
 	SimulationMode       bool            // When true, log blocks but don't actually block requests
+	DefenseFeatures      DefenseFeature  // Enabled defense features (bitfield)
 }
 
 type Defender struct {
@@ -55,7 +163,11 @@ type Defender struct {
 	storage                  storage.Storage       // Redis or memory for blocked IPs
 	analysisThreshold        int
 	blockDuration            time.Duration
-	suspiciousPatterns       []*regexp.Regexp
+	sqlInjectionPatterns     []*regexp.Regexp // SQL injection patterns
+	xssPatterns              []*regexp.Regexp // XSS attack patterns
+	openRedirectPatterns     []*regexp.Regexp // Open redirect patterns
+	fileAccessPatterns       []*regexp.Regexp // Sensitive file access patterns
+	adminScanningPatterns    []*regexp.Regexp // Admin panel scanning patterns
 	whitelistPatterns        []*regexp.Regexp // Static asset patterns to exclude from analysis
 	pathTraversalPatterns    []*regexp.Regexp // Path traversal patterns (checked on all requests)
 	excessiveNestingPatterns []*regexp.Regexp // Excessive nesting patterns (immediate block on first occurrence)
@@ -77,6 +189,7 @@ type Defender struct {
 	evictionInProgress       bool                  // Flag to prevent concurrent evictions
 	evictionThreshold        int                   // Preemptive eviction threshold (e.g., 90% of max)
 	simulationMode           bool                  // When true, log blocks but don't actually block requests
+	defenseFeatures          DefenseFeature        // Enabled defense features (bitfield for fast checking)
 	subnetViolations         map[string]int        // Track how many IPs per /24 subnet have been blocked
 	blockedSubnets           map[string]time.Time  // Blocked /24 subnets (CIDR -> expiry time)
 	telemetry                *AppInsightsTelemetry // Azure Application Insights telemetry
@@ -122,6 +235,7 @@ func NewDefender(opts DefenderOptions) *Defender {
 		evictionInProgress: false,
 		evictionThreshold:  evictionThreshold,
 		simulationMode:     opts.SimulationMode,
+		defenseFeatures:    opts.DefenseFeatures,
 	}
 
 	// Initialize path traversal patterns (checked on ALL requests including whitelisted)
@@ -173,29 +287,69 @@ func NewDefender(opts DefenderOptions) *Defender {
 		}
 	}
 
-	// Initialize suspicious patterns (checked only on non-whitelisted requests)
-	patterns := []string{
-		`\/wp-admin`,       // WordPress admin
-		`\/wp-login`,       // WordPress login
-		`\/phpmyadmin`,     // phpMyAdmin
-		`\.php$`,           // PHP files
-		`\.env$`,           // Environment files
-		`\/\.git`,          // Git directory
-		`\/admin`,          // Generic admin
-		`eval\(`,           // Code injection
-		`<script`,          // XSS attempts
+	// Initialize SQL injection patterns
+	sqlInjectionPatterns := []string{
 		`UNION.*SELECT`,    // SQL injection
 		`;\s*DROP\s+TABLE`, // SQL injection
-		`/config`,          // Config files
-		`/backup`,          // Backup files
+	}
+
+	for _, pattern := range sqlInjectionPatterns {
+		if re, err := regexp.Compile(`(?i)` + pattern); err == nil {
+			d.sqlInjectionPatterns = append(d.sqlInjectionPatterns, re)
+		}
+	}
+
+	// Initialize XSS patterns
+	xssPatterns := []string{
+		`<script`, // XSS attempts
+		`eval\(`,  // Code injection
+	}
+
+	for _, pattern := range xssPatterns {
+		if re, err := regexp.Compile(`(?i)` + pattern); err == nil {
+			d.xssPatterns = append(d.xssPatterns, re)
+		}
+	}
+
+	// Initialize open redirect patterns
+	openRedirectPatterns := []string{
 		`[?&](redirect|return|url|next|dest|destination|continue|view|target|redir|r|u)=https?://`, // Open redirect
 		`[?&](redirect|return|url|next|dest|destination|continue|view|target|redir|r|u)=//`,        // Protocol-relative redirect
 		`[?&](redirect|return|url|next|dest|destination|continue|view|target|redir|r|u)=.*%2f%2f`,  // Encoded // in redirect
 	}
 
-	for _, pattern := range patterns {
+	for _, pattern := range openRedirectPatterns {
 		if re, err := regexp.Compile(`(?i)` + pattern); err == nil {
-			d.suspiciousPatterns = append(d.suspiciousPatterns, re)
+			d.openRedirectPatterns = append(d.openRedirectPatterns, re)
+		}
+	}
+
+	// Initialize file access patterns
+	fileAccessPatterns := []string{
+		`\.env$`,  // Environment files
+		`\/\.git`, // Git directory
+		`/config`, // Config files
+		`/backup`, // Backup files
+	}
+
+	for _, pattern := range fileAccessPatterns {
+		if re, err := regexp.Compile(`(?i)` + pattern); err == nil {
+			d.fileAccessPatterns = append(d.fileAccessPatterns, re)
+		}
+	}
+
+	// Initialize admin scanning patterns
+	adminScanningPatterns := []string{
+		`\/wp-admin`,   // WordPress admin
+		`\/wp-login`,   // WordPress login
+		`\/phpmyadmin`, // phpMyAdmin
+		`\.php$`,       // PHP files
+		`\/admin`,      // Generic admin
+	}
+
+	for _, pattern := range adminScanningPatterns {
+		if re, err := regexp.Compile(`(?i)` + pattern); err == nil {
+			d.adminScanningPatterns = append(d.adminScanningPatterns, re)
 		}
 	}
 
@@ -231,22 +385,24 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 	d.totalRequests++
 	d.mu.Unlock()
 
-	// SUBNET CHECK: Block entire /24 subnets if previously flagged
-	subnet := d.extractSubnet(ip)
-	if subnet != "" {
-		d.mu.RLock()
-		if expiresAt, blocked := d.blockedSubnets[subnet]; blocked && time.Now().Before(expiresAt) {
-			d.mu.RUnlock()
-			d.mu.Lock()
-			d.blockedRequests++
-			d.repeatBlockedRequests++
-			d.mu.Unlock()
+	// SUBNET CHECK: Block entire /24 subnets if previously flagged (if enabled)
+	if d.defenseFeatures&FeatureSubnetBlocking != 0 {
+		subnet := d.extractSubnet(ip)
+		if subnet != "" {
+			d.mu.RLock()
+			if expiresAt, blocked := d.blockedSubnets[subnet]; blocked && time.Now().Before(expiresAt) {
+				d.mu.RUnlock()
+				d.mu.Lock()
+				d.blockedRequests++
+				d.repeatBlockedRequests++
+				d.mu.Unlock()
 
-			log.Printf("DEBUG: Subnet %s blocked, rejecting IP %s: %s", subnet, ip, uri)
-			d.handleBlockedRequest(w, ip, uri, "subnet")
-			return
+				log.Printf("DEBUG: Subnet %s blocked, rejecting IP %s: %s", subnet, ip, uri)
+				d.handleBlockedRequest(w, ip, uri, "subnet")
+				return
+			}
+			d.mu.RUnlock()
 		}
-		d.mu.RUnlock()
 	}
 
 	// OPTIMIZATION: Check blockedCache FIRST before any expensive pattern matching
@@ -276,7 +432,7 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 
 	// IMMEDIATE CHECK: Block excessive nesting BEFORE logging (unforgiving)
 	// This prevents the first malicious request from reaching the backend
-	if d.hasExcessiveNestingFast(uri) {
+	if d.defenseFeatures&FeatureExcessiveNesting != 0 && d.hasExcessiveNestingFast(uri) {
 		// ATOMIC CHECK-AND-SET: Use single Lock to prevent race condition
 		// This ensures concurrent requests can't all pass the "already blocked?" check
 		d.mu.Lock()
@@ -302,7 +458,7 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 		go func() {
 			ctx := context.Background()
 			reason := "Excessive URL-encoded nesting detected (immediate block)"
-			if err := d.storage.BlockIP(ctx, ip, reason, d.blockDuration); err != nil {
+			if err := d.storage.BlockIP(ctx, ip, reason, d.blockDuration, 1); err != nil {
 				log.Printf("Failed to store blocked IP in storage: %v", err)
 			}
 
@@ -471,19 +627,21 @@ func (d *Defender) analyzeIP(ip string) {
 	isPathTraversal := false
 	isExcessiveNesting := false
 
-	// Check ALL requests (including whitelisted) for path traversal
-	for _, reqLog := range tracker.RequestLogs {
-		if d.hasPathTraversal(reqLog.URI) {
-			suspicious = true
-			suspiciousURI = reqLog.URI
-			reason = "Path traversal attempt detected"
-			isPathTraversal = true
-			break
+	// Check ALL requests (including whitelisted) for path traversal - if enabled
+	if d.defenseFeatures&FeaturePathTraversal != 0 {
+		for _, reqLog := range tracker.RequestLogs {
+			if d.hasPathTraversal(reqLog.URI) {
+				suspicious = true
+				suspiciousURI = reqLog.URI
+				reason = "Path traversal attempt detected"
+				isPathTraversal = true
+				break
+			}
 		}
 	}
 
-	// Check for excessive URL-encoded nesting (unforgiving - checked immediately)
-	if !suspicious {
+	// Check for excessive URL-encoded nesting (unforgiving - checked immediately) - if enabled
+	if !suspicious && d.defenseFeatures&FeatureExcessiveNesting != 0 {
 		for _, reqLog := range tracker.RequestLogs {
 			if d.hasExcessiveNesting(reqLog.URI) {
 				suspicious = true
@@ -537,8 +695,8 @@ func (d *Defender) analyzeIP(ip string) {
 		}
 	}
 
-	// Check for identical URI repetition (automation detection)
-	if !suspicious {
+	// Check for identical URI repetition (automation detection) - if enabled
+	if !suspicious && d.defenseFeatures&FeatureIdenticalURI != 0 {
 		uriCounts := make(map[string]int)
 		for _, reqLog := range tracker.RequestLogs {
 			if !reqLog.IsWhitelisted {
@@ -558,8 +716,8 @@ func (d *Defender) analyzeIP(ip string) {
 		}
 	}
 
-	// Check for sliding window burst patterns
-	if !suspicious {
+	// Check for sliding window burst patterns - if enabled
+	if !suspicious && d.defenseFeatures&FeatureBurstDetection != 0 {
 		if d.hasConsecutiveBurst(tracker.RequestLogs, 3, 5*time.Second) {
 			suspicious = true
 			reason = "Burst pattern detected (3+ requests in 5 seconds)"
@@ -591,7 +749,7 @@ func (d *Defender) analyzeIP(ip string) {
 
 		// Store in Redis/persistent storage (async)
 		ctx := context.Background()
-		if err := d.storage.BlockIP(ctx, ip, reason, d.blockDuration); err != nil {
+		if err := d.storage.BlockIP(ctx, ip, reason, d.blockDuration, requestCount); err != nil {
 			log.Printf("Failed to store blocked IP in storage: %v", err)
 		}
 
@@ -619,35 +777,41 @@ func (d *Defender) analyzeIP(ip string) {
 		}
 
 		// Subnet-level blocking: Track subnet violations and auto-block after threshold
-		subnet := d.extractSubnet(ip)
-		if subnet != "" {
-			d.mu.Lock()
-			d.subnetViolations[subnet]++
-			violationCount := d.subnetViolations[subnet]
-			d.mu.Unlock()
-
-			// Block entire /24 subnet after 3 IPs from same subnet are blocked
-			if violationCount >= 3 {
+		if d.defenseFeatures&FeatureSubnetBlocking != 0 {
+			subnet := d.extractSubnet(ip)
+			if subnet != "" {
+				// ATOMIC: Keep lock held during entire check-and-set to prevent race condition
 				d.mu.Lock()
-				if _, alreadyBlocked := d.blockedSubnets[subnet]; !alreadyBlocked {
-					d.blockedSubnets[subnet] = time.Now().Add(d.blockDuration)
-					d.subnetBlocks++
-					d.mu.Unlock()
-					log.Printf("SUBNET BLOCKED: %s after %d violations (IPs: %s and others)",
-						subnet, violationCount, ip)
+				d.subnetViolations[subnet]++
+				violationCount := d.subnetViolations[subnet]
 
-					// Record subnet block event
-					subnetEvent := storage.BlockEvent{
-						IP:            subnet,
-						BlockedAt:     time.Now(),
-						Reason:        fmt.Sprintf("Subnet-level block after %d violations", violationCount),
-						SuspiciousURI: suspiciousURI,
-						RequestCount:  violationCount,
-					}
-					if err := d.storage.RecordBlockEvent(ctx, subnetEvent); err != nil {
-						log.Printf("Failed to record subnet block event: %v", err)
+				// Block entire /24 subnet after 3 IPs from same subnet are blocked
+				if violationCount >= 3 {
+					if _, alreadyBlocked := d.blockedSubnets[subnet]; !alreadyBlocked {
+						d.blockedSubnets[subnet] = time.Now().Add(d.blockDuration)
+						d.subnetBlocks++
+						d.mu.Unlock()
+
+						log.Printf("SUBNET BLOCKED: %s after %d violations (IPs: %s and others)",
+							subnet, violationCount, ip)
+
+						// Record subnet block event
+						subnetEvent := storage.BlockEvent{
+							IP:            subnet,
+							BlockedAt:     time.Now(),
+							Reason:        fmt.Sprintf("Subnet-level block after %d violations", violationCount),
+							SuspiciousURI: suspiciousURI,
+							RequestCount:  violationCount,
+						}
+						if err := d.storage.RecordBlockEvent(ctx, subnetEvent); err != nil {
+							log.Printf("Failed to record subnet block event: %v", err)
+						}
+					} else {
+						// Subnet already blocked
+						d.mu.Unlock()
 					}
 				} else {
+					// Violation count < 3, just unlock
 					d.mu.Unlock()
 				}
 			}
@@ -666,12 +830,53 @@ func (d *Defender) analyzeIP(ip string) {
 	d.mu.Unlock()
 }
 
+// isSuspicious checks if a URI matches any enabled attack patterns
 func (d *Defender) isSuspicious(uri string) bool {
-	for _, pattern := range d.suspiciousPatterns {
-		if pattern.MatchString(uri) {
-			return true
+	// Check SQL injection - if enabled
+	if d.defenseFeatures&FeatureSQLInjection != 0 {
+		for _, pattern := range d.sqlInjectionPatterns {
+			if pattern.MatchString(uri) {
+				return true
+			}
 		}
 	}
+
+	// Check XSS - if enabled
+	if d.defenseFeatures&FeatureXSS != 0 {
+		for _, pattern := range d.xssPatterns {
+			if pattern.MatchString(uri) {
+				return true
+			}
+		}
+	}
+
+	// Check open redirect - if enabled
+	if d.defenseFeatures&FeatureOpenRedirect != 0 {
+		for _, pattern := range d.openRedirectPatterns {
+			if pattern.MatchString(uri) {
+				return true
+			}
+		}
+	}
+
+	// Check file access - if enabled
+	if d.defenseFeatures&FeatureFileAccess != 0 {
+		for _, pattern := range d.fileAccessPatterns {
+			if pattern.MatchString(uri) {
+				return true
+			}
+		}
+	}
+
+	// Check admin scanning - if enabled
+	if d.defenseFeatures&FeatureAdminScanning != 0 {
+		for _, pattern := range d.adminScanningPatterns {
+			if pattern.MatchString(uri) {
+				return true
+			}
+		}
+	}
+
 	return false
 }
 
@@ -923,6 +1128,15 @@ func (d *Defender) cleanupExpired() {
 			}
 		}
 
+		// Clean up blocked subnets (prevent memory leak)
+		for subnet, expiresAt := range d.blockedSubnets {
+			if now.After(expiresAt) {
+				delete(d.blockedSubnets, subnet)
+				// Also clean up violation count for expired subnets
+				delete(d.subnetViolations, subnet)
+			}
+		}
+
 		// Clean up active trackers
 		for ip, tracker := range d.ipTrackers {
 			// Remove old request logs (keep only last 100)
@@ -1027,13 +1241,14 @@ func (d *Defender) SetErrorLogger(logger storage.ErrorLogger) {
 }
 
 type Stats struct {
-	TotalIPs        int         `json:"total_ips"`
-	BlockedIPs      int         `json:"blocked_ips"`
-	ActiveIPs       int         `json:"active_ips"`
-	TopIPs          []IPStats   `json:"top_ips"`
-	MemoryUsage     MemoryStats `json:"memory_usage"`
-	TotalRequests   int64       `json:"total_requests"`
-	BlockedRequests int64       `json:"blocked_requests"`
+	TotalIPs              int         `json:"total_ips"`
+	BlockedIPs            int         `json:"blocked_ips"`
+	ActiveIPs             int         `json:"active_ips"`
+	TopIPs                []IPStats   `json:"top_ips"`
+	MemoryUsage           MemoryStats `json:"memory_usage"`
+	TotalRequests         int64       `json:"total_requests"`
+	BlockedRequests       int64       `json:"blocked_requests"`
+	RepeatBlockedRequests int64       `json:"repeat_blocked_requests"`
 }
 
 type MemoryStats struct {
@@ -1055,6 +1270,7 @@ func (d *Defender) GetStats(w http.ResponseWriter, r *http.Request) {
 	activeIPs := len(d.ipTrackers)
 	totalRequests := d.totalRequests
 	blockedRequests := d.blockedRequests
+	repeatBlockedRequests := d.repeatBlockedRequests
 	maxTrackedIPs := d.maxTrackedIPs
 	droppedIPs := d.droppedIPs
 	d.mu.RUnlock()
@@ -1072,12 +1288,13 @@ func (d *Defender) GetStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	stats := Stats{
-		TotalIPs:        activeIPs + len(blockedIPs),
-		BlockedIPs:      len(blockedIPs),
-		ActiveIPs:       activeIPs,
-		TopIPs:          []IPStats{},
-		TotalRequests:   totalRequests,
-		BlockedRequests: blockedRequests,
+		TotalIPs:              activeIPs + len(blockedIPs),
+		BlockedIPs:            len(blockedIPs),
+		ActiveIPs:             activeIPs,
+		TopIPs:                []IPStats{},
+		TotalRequests:         totalRequests,
+		BlockedRequests:       blockedRequests,
+		RepeatBlockedRequests: repeatBlockedRequests,
 		MemoryUsage: MemoryStats{
 			TrackedIPs:    activeIPs,
 			MaxTrackedIPs: maxTrackedIPs,
@@ -1090,7 +1307,7 @@ func (d *Defender) GetStats(w http.ResponseWriter, r *http.Request) {
 	for _, info := range blockedIPs {
 		stats.TopIPs = append(stats.TopIPs, IPStats{
 			IP:        info.IP,
-			Requests:  0, // Not tracked in storage
+			Requests:  info.RequestCount,
 			Blocked:   true,
 			BlockedAt: info.BlockedAt.Format(time.RFC3339),
 		})
