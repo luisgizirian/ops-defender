@@ -15,6 +15,7 @@ import (
 	"time"
 
 	extensions "github.com/ops/defender/extension-points"
+	extensions "github.com/ops/defender/extension-points"
 	"github.com/ops/defender/internal/storage"
 )
 
@@ -40,6 +41,14 @@ type IPTracker struct {
 
 // DefenderOptions contains configuration options for creating a new Defender
 type DefenderOptions struct {
+	AnalysisThreshold    int                         // Number of requests to collect before analysis
+	BlockDuration        time.Duration               // Duration to block suspicious IPs
+	Storage              storage.Storage             // Redis or memory storage for blocked IPs
+	MaxTrackedIPs        int                         // Maximum number of IPs to track simultaneously
+	EvictionBatchPct     float64                     // Percentage of IPs to evict in bulk (0.01-1.0, default 0.10)
+	EvictionThresholdPct float64                     // Preemptive eviction threshold (0.5-1.0, default 0.93)
+	SimulationMode       bool                        // When true, log blocks but don't actually block requests
+	ExtensionRegistry    *extensions.ExtensionRegistry // Optional extension registry for custom patterns and rules
 	AnalysisThreshold    int                         // Number of requests to collect before analysis
 	BlockDuration        time.Duration               // Duration to block suspicious IPs
 	Storage              storage.Storage             // Redis or memory storage for blocked IPs
@@ -118,6 +127,7 @@ func NewDefender(opts DefenderOptions) *Defender {
 		evictionInProgress: false,
 		evictionThreshold:  evictionThreshold,
 		simulationMode:     opts.SimulationMode,
+		extensionRegistry:  opts.ExtensionRegistry,
 		extensionRegistry:  opts.ExtensionRegistry,
 	}
 
@@ -208,6 +218,18 @@ func NewDefender(opts DefenderOptions) *Defender {
 		log.Printf("Loaded %d extension whitelist patterns", len(extensionWhitelists))
 	}
 
+	// Load patterns from extension registry if provided
+	if d.extensionRegistry != nil {
+		extensionPatterns := d.extensionRegistry.GetAllPatterns()
+		d.suspiciousPatterns = append(d.suspiciousPatterns, extensionPatterns...)
+		log.Printf("Loaded %d extension patterns", len(extensionPatterns))
+
+		// Load whitelist patterns from extensions
+		extensionWhitelists := d.extensionRegistry.GetAllWhitelistPatterns()
+		d.whitelistPatterns = append(d.whitelistPatterns, extensionWhitelists...)
+		log.Printf("Loaded %d extension whitelist patterns", len(extensionWhitelists))
+	}
+
 	// Start background workers
 	go d.analysisWorker()
 	go d.cleanupExpired()
@@ -263,6 +285,19 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 	// DEBUG: Log URIs with returnUrl to diagnose pattern matching
 	if strings.Contains(strings.ToLower(uri), "returnurl") {
 		log.Printf("DEBUG: IP=%s, URI=%s, HasNesting=%v", ip, uri, d.hasExcessiveNestingFast(uri))
+	}
+
+	// PRE-REQUEST HANDLER HOOK: Call registered pre-request handlers
+	// Allows extensions to intercept requests before any core processing
+	if d.extensionRegistry != nil {
+		preHandlers := d.extensionRegistry.GetAllPreRequestHandlers()
+		for _, handler := range preHandlers {
+			if action := handler.Handle(ip, uri, userAgent); action == extensions.Terminate {
+				// Extension requested termination - allow request through without processing
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+		}
 	}
 
 	// PRE-REQUEST HANDLER HOOK: Call registered pre-request handlers
@@ -460,6 +495,19 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// POST-REQUEST HANDLER HOOK: Call registered post-request handlers
+	// Allows extensions to perform custom post-processing after logging
+	if d.extensionRegistry != nil {
+		postHandlers := d.extensionRegistry.GetAllPostRequestHandlers()
+		for _, handler := range postHandlers {
+			if action := handler.Handle(ip, uri, userAgent, requestCount); action == extensions.Terminate {
+				// Extension requested termination - allow request through without further processing
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+		}
+	}
+
 	// Allow request to proceed (non-blocking)
 	w.WriteHeader(http.StatusOK)
 }
@@ -519,6 +567,37 @@ func (d *Defender) analyzeIP(ip string) {
 				suspicious = true
 				suspiciousURI = reqLog.URI
 				reason = "Suspicious URL pattern detected"
+				break
+			}
+		}
+	}
+
+	// Check custom blocking rules from extensions
+	if !suspicious && d.extensionRegistry != nil {
+		blockingRules := d.extensionRegistry.GetAllBlockingRules()
+		requestCount := len(tracker.RequestLogs)
+		
+		// Convert request logs to extension-compatible format
+		requestLogInfos := make([]extensions.RequestLogInfo, len(tracker.RequestLogs))
+		for i, reqLog := range tracker.RequestLogs {
+			requestLogInfos[i] = extensions.RequestLogInfo{
+				URI:           reqLog.URI,
+				Timestamp:     reqLog.Timestamp.Format(time.RFC3339),
+				UserAgent:     reqLog.UserAgent,
+				IsWhitelisted: reqLog.IsWhitelisted,
+			}
+		}
+		
+		// Apply blocking rules in priority order
+		for _, rule := range blockingRules {
+			shouldBlock, blockReason := rule.ShouldBlock(ip, requestCount, requestLogInfos)
+			if shouldBlock {
+				suspicious = true
+				reason = fmt.Sprintf("Extension rule: %s", blockReason)
+				if len(tracker.RequestLogs) > 0 {
+					suspiciousURI = tracker.RequestLogs[len(tracker.RequestLogs)-1].URI
+				}
+				log.Printf("IP %s blocked by extension rule '%s': %s", ip, rule.GetName(), blockReason)
 				break
 			}
 		}
