@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ops/defender/internal/extensions"
 	"github.com/ops/defender/internal/storage"
 )
 
@@ -73,10 +74,11 @@ type Defender struct {
 	evictionBatchPct         float64               // Percentage of IPs to evict in bulk (default 0.10 = 10%)
 	evictionInProgress       bool                  // Flag to prevent concurrent evictions
 	evictionThreshold        int                   // Preemptive eviction threshold (e.g., 90% of max)
-	simulationMode           bool                  // When true, log blocks but don't actually block requests
-	telemetry                *AppInsightsTelemetry // Azure Application Insights telemetry
-	eventStream              *EventStream          // Real-time event stream
-	errorLogger              storage.ErrorLogger   // File-based error logger for critical issues
+	simulationMode           bool                           // When true, log blocks but don't actually block requests
+	telemetry                *AppInsightsTelemetry          // Azure Application Insights telemetry
+	eventStream              *EventStream                   // Real-time event stream
+	errorLogger              storage.ErrorLogger            // File-based error logger for critical issues
+	preHandlers              []extensions.RequestPreHandler // Registered extension pre-handlers (invoked before request processing)
 }
 
 func NewDefender(opts DefenderOptions) *Defender {
@@ -218,6 +220,39 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 		uri = r.URL.Path
 	}
 	userAgent := r.Header.Get("User-Agent")
+
+	// EXTENSION POINT: Invoke pre-handlers before any processing
+	// Extensions can inspect the request and decide to bypass all core logic
+	d.mu.RLock()
+	preHandlers := d.preHandlers // Copy slice to avoid holding lock during extension execution
+	d.mu.RUnlock()
+
+	if len(preHandlers) > 0 {
+		requestInfo := extensions.RequestInfoFromHTTP(r, ip, uri)
+
+		for _, handler := range preHandlers {
+			result, err := handler.PreHandleRequest(requestInfo)
+			if err != nil {
+				// Log error but continue processing (fail-open for extensions)
+				log.Printf("Extension '%s' returned error, continuing: %v", handler.Name(), err)
+				continue
+			}
+
+			if result.ShouldBypass {
+				// Extension decided to bypass - skip all processing and logging
+				reason := result.Reason
+				if reason == "" {
+					reason = "extension bypass"
+				}
+				log.Printf("Request bypassed by extension '%s': IP=%s, URI=%s, Reason=%s",
+					handler.Name(), ip, uri, reason)
+
+				// Return 200 (allow) without any tracking
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+		}
+	}
 
 	// Increment total requests at the very start (before any blocking logic)
 	d.mu.Lock()
@@ -884,6 +919,41 @@ func (d *Defender) SetErrorLogger(logger storage.ErrorLogger) {
 	if healthCheckable, ok := d.storage.(storage.HealthCheckable); ok {
 		healthCheckable.SetErrorLogger(logger)
 	}
+}
+
+// RegisterExtension registers a RequestPreHandler extension that will be invoked
+// before each request is processed by the core system.
+//
+// Extensions are invoked in registration order. The first extension that returns
+// ShouldBypass=true will cause the request to bypass all core processing.
+//
+// This method is thread-safe and can be called at any time during the defender's lifecycle.
+func (d *Defender) RegisterExtension(handler extensions.RequestPreHandler) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// Validate extension
+	if handler == nil {
+		log.Printf("WARNING: Attempted to register nil extension, ignoring")
+		return
+	}
+
+	name := handler.Name()
+	if name == "" {
+		log.Printf("WARNING: Extension has empty name, ignoring registration")
+		return
+	}
+
+	// Check for duplicate registration
+	for _, existing := range d.preHandlers {
+		if existing.Name() == name {
+			log.Printf("WARNING: Extension '%s' already registered, ignoring duplicate", name)
+			return
+		}
+	}
+
+	d.preHandlers = append(d.preHandlers, handler)
+	log.Printf("Registered extension: %s (total extensions: %d)", name, len(d.preHandlers))
 }
 
 type Stats struct {

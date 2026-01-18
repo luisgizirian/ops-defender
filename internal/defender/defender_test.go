@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ops/defender/internal/extensions"
 	"github.com/ops/defender/internal/storage"
 )
 
@@ -1300,3 +1301,466 @@ func BenchmarkDefender_HasExcessiveNestingFast(b *testing.B) {
 		}
 	})
 }
+
+// Extension integration tests
+
+// mockExtension is a test implementation of RequestPreHandler
+type mockExtension struct {
+	name         string
+	shouldBypass bool
+	bypassReason string
+	returnError  error
+	callCount    int
+}
+
+func (m *mockExtension) Name() string {
+	return m.name
+}
+
+func (m *mockExtension) PreHandleRequest(req extensions.RequestInfo) (extensions.PreHandlerResult, error) {
+	m.callCount++
+	
+	if m.returnError != nil {
+		return extensions.PreHandlerResult{}, m.returnError
+	}
+
+	return extensions.PreHandlerResult{
+		ShouldBypass: m.shouldBypass,
+		Reason:       m.bypassReason,
+	}, nil
+}
+
+func TestDefender_RegisterExtension(t *testing.T) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    5,
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+	})
+
+	// Register extension
+	ext := &mockExtension{name: "test-extension", shouldBypass: false}
+	defender.RegisterExtension(ext)
+
+	// Verify extension is registered
+	defender.mu.RLock()
+	handlerCount := len(defender.preHandlers)
+	defender.mu.RUnlock()
+
+	if handlerCount != 1 {
+		t.Errorf("Expected 1 registered extension, got %d", handlerCount)
+	}
+}
+
+func TestDefender_RegisterExtension_DuplicateRejected(t *testing.T) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    5,
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+	})
+
+	// Register extension twice
+	ext1 := &mockExtension{name: "duplicate-test"}
+	ext2 := &mockExtension{name: "duplicate-test"}
+
+	defender.RegisterExtension(ext1)
+	defender.RegisterExtension(ext2) // Should be rejected
+
+	// Should only have 1 handler
+	defender.mu.RLock()
+	handlerCount := len(defender.preHandlers)
+	defender.mu.RUnlock()
+
+	if handlerCount != 1 {
+		t.Errorf("Expected duplicate registration to be rejected, got %d handlers", handlerCount)
+	}
+}
+
+func TestDefender_RegisterExtension_NilRejected(t *testing.T) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    5,
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+	})
+
+	defender.RegisterExtension(nil)
+
+	// Should have 0 handlers
+	defender.mu.RLock()
+	handlerCount := len(defender.preHandlers)
+	defender.mu.RUnlock()
+
+	if handlerCount != 0 {
+		t.Errorf("Expected nil extension to be rejected, got %d handlers", handlerCount)
+	}
+}
+
+func TestDefender_Extension_Bypass(t *testing.T) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    5,
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+	})
+
+	// Register extension that bypasses all requests
+	ext := &mockExtension{
+		name:         "bypass-all",
+		shouldBypass: true,
+		bypassReason: "test bypass",
+	}
+	defender.RegisterExtension(ext)
+
+	// Send request
+	req := httptest.NewRequest("GET", "/check", nil)
+	req.Header.Set("X-Real-IP", "192.168.1.100")
+	req.Header.Set("X-Original-URI", "/wp-admin") // Normally suspicious
+
+	w := httptest.NewRecorder()
+	defender.CheckRequest(w, req)
+
+	// Should be allowed (bypassed)
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected request to be bypassed, got %d", w.Code)
+	}
+
+	// Extension should have been called
+	if ext.callCount != 1 {
+		t.Errorf("Expected extension to be called once, got %d", ext.callCount)
+	}
+
+	// Request should not be tracked
+	defender.mu.RLock()
+	trackedIPs := len(defender.ipTrackers)
+	totalRequests := defender.totalRequests
+	defender.mu.RUnlock()
+
+	if trackedIPs != 0 {
+		t.Errorf("Expected no tracked IPs for bypassed request, got %d", trackedIPs)
+	}
+
+	if totalRequests != 0 {
+		t.Errorf("Expected totalRequests to be 0 for bypassed request, got %d", totalRequests)
+	}
+}
+
+func TestDefender_Extension_NoBypassContinuesNormalFlow(t *testing.T) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    5,
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+	})
+
+	// Register extension that doesn't bypass
+	ext := &mockExtension{
+		name:         "no-bypass",
+		shouldBypass: false,
+	}
+	defender.RegisterExtension(ext)
+
+	// Send request
+	req := httptest.NewRequest("GET", "/check", nil)
+	req.Header.Set("X-Real-IP", "192.168.1.101")
+	req.Header.Set("X-Original-URI", "/normal-path")
+
+	w := httptest.NewRecorder()
+	defender.CheckRequest(w, req)
+
+	// Should be allowed (normal flow)
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected request to proceed normally, got %d", w.Code)
+	}
+
+	// Extension should have been called
+	if ext.callCount != 1 {
+		t.Errorf("Expected extension to be called once, got %d", ext.callCount)
+	}
+
+	// Request SHOULD be tracked (normal processing)
+	defender.mu.RLock()
+	trackedIPs := len(defender.ipTrackers)
+	totalRequests := defender.totalRequests
+	defender.mu.RUnlock()
+
+	if trackedIPs != 1 {
+		t.Errorf("Expected 1 tracked IP for non-bypassed request, got %d", trackedIPs)
+	}
+
+	if totalRequests != 1 {
+		t.Errorf("Expected totalRequests to be 1, got %d", totalRequests)
+	}
+}
+
+func TestDefender_Extension_ErrorFailsOpen(t *testing.T) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    5,
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+	})
+
+	// Register extension that returns error
+	ext := &mockExtension{
+		name:        "error-extension",
+		returnError: fmt.Errorf("test error"),
+	}
+	defender.RegisterExtension(ext)
+
+	// Send request
+	req := httptest.NewRequest("GET", "/check", nil)
+	req.Header.Set("X-Real-IP", "192.168.1.102")
+	req.Header.Set("X-Original-URI", "/normal-path")
+
+	w := httptest.NewRecorder()
+	defender.CheckRequest(w, req)
+
+	// Should proceed normally (fail-open)
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected error to fail-open, got %d", w.Code)
+	}
+
+	// Extension should have been called
+	if ext.callCount != 1 {
+		t.Errorf("Expected extension to be called once, got %d", ext.callCount)
+	}
+
+	// Request should be tracked (normal processing continued)
+	defender.mu.RLock()
+	trackedIPs := len(defender.ipTrackers)
+	defender.mu.RUnlock()
+
+	if trackedIPs != 1 {
+		t.Errorf("Expected 1 tracked IP after extension error, got %d", trackedIPs)
+	}
+}
+
+func TestDefender_Extension_OrderedExecution(t *testing.T) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    5,
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+	})
+
+	// Register two extensions - first doesn't bypass, second does
+	ext1 := &mockExtension{name: "first", shouldBypass: false}
+	ext2 := &mockExtension{name: "second", shouldBypass: true, bypassReason: "second handler"}
+	
+	defender.RegisterExtension(ext1)
+	defender.RegisterExtension(ext2)
+
+	// Send request
+	req := httptest.NewRequest("GET", "/check", nil)
+	req.Header.Set("X-Real-IP", "192.168.1.103")
+	req.Header.Set("X-Original-URI", "/test")
+
+	w := httptest.NewRecorder()
+	defender.CheckRequest(w, req)
+
+	// Should be bypassed by second handler
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected request to be bypassed by second handler, got %d", w.Code)
+	}
+
+	// Both extensions should have been called
+	if ext1.callCount != 1 {
+		t.Errorf("Expected first extension to be called, got %d", ext1.callCount)
+	}
+
+	if ext2.callCount != 1 {
+		t.Errorf("Expected second extension to be called, got %d", ext2.callCount)
+	}
+
+	// Request should NOT be tracked (bypassed)
+	defender.mu.RLock()
+	trackedIPs := len(defender.ipTrackers)
+	defender.mu.RUnlock()
+
+	if trackedIPs != 0 {
+		t.Errorf("Expected no tracked IPs for bypassed request, got %d", trackedIPs)
+	}
+}
+
+func TestDefender_Extension_FirstBypassStopsExecution(t *testing.T) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    5,
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+	})
+
+	// Register two extensions - first bypasses, second should not be called
+	ext1 := &mockExtension{name: "bypass-first", shouldBypass: true, bypassReason: "first"}
+	ext2 := &mockExtension{name: "never-called", shouldBypass: false}
+	
+	defender.RegisterExtension(ext1)
+	defender.RegisterExtension(ext2)
+
+	// Send request
+	req := httptest.NewRequest("GET", "/check", nil)
+	req.Header.Set("X-Real-IP", "192.168.1.104")
+	req.Header.Set("X-Original-URI", "/test")
+
+	w := httptest.NewRecorder()
+	defender.CheckRequest(w, req)
+
+	// Should be bypassed by first handler
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected request to be bypassed, got %d", w.Code)
+	}
+
+	// First extension should be called
+	if ext1.callCount != 1 {
+		t.Errorf("Expected first extension to be called, got %d", ext1.callCount)
+	}
+
+	// Second extension should NOT be called (first one bypassed)
+	if ext2.callCount != 0 {
+		t.Errorf("Expected second extension to NOT be called, got %d", ext2.callCount)
+	}
+}
+
+func TestDefender_Extension_BypassSkipsBlocking(t *testing.T) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    1, // Low threshold for quick blocking
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+	})
+
+	ip := "192.168.1.105"
+
+	// First, send suspicious request WITHOUT extension (should get blocked)
+	req1 := httptest.NewRequest("GET", "/check", nil)
+	req1.Header.Set("X-Real-IP", ip)
+	req1.Header.Set("X-Original-URI", "/wp-admin") // Suspicious
+
+	w1 := httptest.NewRecorder()
+	defender.CheckRequest(w1, req1)
+
+	// Wait for analysis
+	time.Sleep(100 * time.Millisecond)
+
+	// Second request should be blocked
+	req2 := httptest.NewRequest("GET", "/check", nil)
+	req2.Header.Set("X-Real-IP", ip)
+	req2.Header.Set("X-Original-URI", "/any-path")
+
+	w2 := httptest.NewRecorder()
+	defender.CheckRequest(w2, req2)
+
+	if w2.Code != http.StatusForbidden {
+		t.Errorf("Expected IP to be blocked, got %d", w2.Code)
+	}
+
+	// Now register bypass extension
+	ext := &mockExtension{name: "bypass-blocked-ip", shouldBypass: true, bypassReason: "extension override"}
+	defender.RegisterExtension(ext)
+
+	// Third request - even though IP is blocked, extension should bypass
+	req3 := httptest.NewRequest("GET", "/check", nil)
+	req3.Header.Set("X-Real-IP", ip)
+	req3.Header.Set("X-Original-URI", "/any-path")
+
+	w3 := httptest.NewRecorder()
+	defender.CheckRequest(w3, req3)
+
+	// Should be allowed (extension bypassed blocking check)
+	if w3.Code != http.StatusOK {
+		t.Errorf("Expected extension to bypass even blocked IP, got %d", w3.Code)
+	}
+}
+
+func BenchmarkDefender_CheckRequest_WithExtension(b *testing.B) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    100,
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+	})
+
+	// Register extension that doesn't bypass (normal flow)
+	ext := &mockExtension{name: "bench-ext", shouldBypass: false}
+	defender.RegisterExtension(ext)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		req := httptest.NewRequest("GET", "/check", nil)
+		req.Header.Set("X-Real-IP", fmt.Sprintf("10.0.%d.%d", i/256, i%256))
+		req.Header.Set("X-Original-URI", "/normal-path")
+
+		w := httptest.NewRecorder()
+		defender.CheckRequest(w, req)
+	}
+}
+
+func BenchmarkDefender_CheckRequest_WithBypassExtension(b *testing.B) {
+	store := storage.NewMemoryStorage(60 * time.Minute)
+	defender := NewDefender(DefenderOptions{
+		AnalysisThreshold:    100,
+		BlockDuration:        60 * time.Minute,
+		Storage:              store,
+		MaxTrackedIPs:        10000,
+		EvictionBatchPct:     0.10,
+		EvictionThresholdPct: 0.93,
+		SimulationMode:       false,
+	})
+
+	// Register extension that bypasses all (shortest path)
+	ext := &mockExtension{name: "bypass-all", shouldBypass: true, bypassReason: "benchmark"}
+	defender.RegisterExtension(ext)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		req := httptest.NewRequest("GET", "/check", nil)
+		req.Header.Set("X-Real-IP", fmt.Sprintf("10.0.%d.%d", i/256, i%256))
+		req.Header.Set("X-Original-URI", "/normal-path")
+
+		w := httptest.NewRecorder()
+		defender.CheckRequest(w, req)
+	}
+}
+
