@@ -166,6 +166,7 @@ PORT=8080 ANALYSIS_THRESHOLD=5 BLOCK_DURATION=60 ./ops-defender
 | `BLOCK_DURATION` | IP block duration in minutes | `60` (1 day = 1440) |
 | `MAX_TRACKED_IPS` | Maximum number of IPs to track simultaneously (memory protection) | `10000` |
 | `EVICTION_BATCH_PERCENT` | Percentage of IPs to evict in bulk when limit reached (0.01-1.0) | `0.10` (10%) |
+| `DEFENSE_FEATURES` | **Modular feature flags** (comma-separated): `subnet-blocking`, `identical-uri`, `burst-detection` | `""` (all disabled) |
 | `SIMULATION_MODE` | When `true`, log blocks but allow all requests (testing mode) | `false` |
 | `REDIS_URL` | Redis connection URL (optional) | - |
 | `APPINSIGHTS_ENABLED` | Enable Azure Application Insights telemetry | `false` |
@@ -175,6 +176,95 @@ PORT=8080 ANALYSIS_THRESHOLD=5 BLOCK_DURATION=60 ./ops-defender
 | `AZURE_STORAGE_ENABLED` | Enable Azure Blob Storage for report archival | `false` |
 | `AZURE_STORAGE_CONNECTION_STRING` | Azure Storage account connection string | - |
 | `AZURE_STORAGE_CONTAINER` | Azure Blob container name for reports | `ops-defender-reports` |
+
+### Defense Features (Modular Configuration)
+
+Ops Defender uses **modular feature flags** that allow you to enable/disable specific defense features per environment without code changes.
+
+**Configuration:**
+```bash
+# All features enabled (DEFAULT - backward compatibility):
+DEFENSE_FEATURES="all"
+
+# All features disabled (opt-in mode for new deployments):
+DEFENSE_FEATURES=""
+
+# Enable specific features only:
+DEFENSE_FEATURES="subnet-blocking,sql-injection,xss"
+
+# Case-insensitive and whitespace-tolerant:
+DEFENSE_FEATURES="PATH-TRAVERSAL, SQL-Injection"
+```
+
+**Available Features:**
+
+| Feature | Description | Performance | Default |
+|---------|-------------|-------------|---------|
+| `path-traversal` | Detects `../` and `..\` patterns in URIs | ~5µs | ✓ |
+| `excessive-nesting` | Blocks 4+ levels of URL-encoded returnUrl params (immediate) | ~150ns-1µs | ✓ |
+| `sql-injection` | Detects `UNION SELECT`, `DROP TABLE` patterns | ~3µs | ✓ |
+| `xss` | Detects `<script>`, `eval()` patterns | ~2µs | ✓ |
+| `open-redirect` | Detects suspicious redirect parameters | ~4µs | ✓ |
+| `file-access` | Blocks access to `.env`, `.git`, `config`, `backup` | ~2µs | ✓ |
+| `admin-scanning` | Blocks `/wp-admin`, `/phpmyadmin`, `.php` probing | ~3µs | ✓ |
+| `subnet-blocking` | Blocks entire /24 subnet after 3+ IPs blocked | ~200ns | ✓ |
+| `identical-uri` | Detects 4+ identical URI repetitions (automation) | ~5µs | ✓ |
+| `burst-detection` | Detects 3+ requests in 5 seconds (sliding window) | ~8µs | ✓ |
+
+**Feature Categories:**
+
+**Pattern-Based Detection (Legacy Features):**
+- `path-traversal` - Pre-existing core defense
+- `excessive-nesting` - Pre-existing immediate blocking
+- `sql-injection` - Pre-existing pattern matching
+- `xss` - Pre-existing pattern matching
+- `open-redirect` - Pre-existing pattern matching
+- `file-access` - Pre-existing pattern matching
+- `admin-scanning` - Pre-existing pattern matching
+
+**Behavioral Detection (New Features):**
+- `subnet-blocking` - Distributed attack mitigation
+- `identical-uri` - Bot/automation detection
+- `burst-detection` - Rate-based attack detection
+
+**Why Modular?**
+- ✓ **Backward Compatibility:** All features enabled by default
+- ✓ **Flexibility:** Disable noisy features in specific environments
+- ✓ **Testing:** Test features individually before combining
+- ✓ **Performance:** Disabled features have zero overhead (bitwise check)
+- ✓ **Validation:** Startup fails on typos - fail-fast behavior
+
+**Metrics per Feature:**
+```promql
+# Pattern-based blocks:
+ops_defender_path_traversal_blocks_total
+ops_defender_excessive_nesting_blocks_total
+ops_defender_suspicious_blocks_total  # SQL/XSS/redirect/file/admin
+
+# Behavioral blocks:
+ops_defender_subnet_blocks_total
+ops_defender_identical_uri_blocks_total
+ops_defender_burst_pattern_blocks_total
+```
+
+**Recommended Configurations:**
+
+**High-Security API (all features):**
+```bash
+DEFENSE_FEATURES="all"  # Default
+```
+
+**Public Website (exclude burst detection if CDN handles rate limiting):**
+```bash
+DEFENSE_FEATURES="path-traversal,excessive-nesting,sql-injection,xss,open-redirect,file-access,admin-scanning,subnet-blocking,identical-uri"
+```
+
+**Development/Testing (core patterns only):**
+```bash
+DEFENSE_FEATURES="path-traversal,sql-injection,xss"
+```
+
+See [FEATURE-FLAGS-REFACTOR.md](FEATURE-FLAGS-REFACTOR.md) for complete implementation details and performance analysis.
 
 ### Storage Options
 

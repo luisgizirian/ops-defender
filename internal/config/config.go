@@ -18,6 +18,9 @@ type Config struct {
 	SimulationMode       bool
 	RedisURL             string
 
+	// Defense features (modular, configurable via comma-separated string)
+	DefenseFeatures      string
+
 	// Reporting
 	MaxReportAgeDays    int
 	AzureStorageEnabled bool
@@ -50,6 +53,11 @@ func LoadConfig() *Config {
 	c.SimulationMode = getEnv("SIMULATION_MODE", "false") == "true"
 
 	c.RedisURL = os.Getenv("REDIS_URL")
+
+	// Defense features (comma-separated list, e.g., "subnet-blocking,identical-uri,burst-detection")
+	// Default: "all" enables all features for backward compatibility with pre-1.x behavior
+	// Set to "" or "none" to disable all features (opt-in mode)
+	c.DefenseFeatures = getEnv("DEFENSE_FEATURES", "all")
 
 	// Eviction settings
 	c.EvictionBatchPct = 0.10

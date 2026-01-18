@@ -21,7 +21,7 @@ type BlockEvent struct {
 
 type Storage interface {
 	IsBlocked(ctx context.Context, ip string) (bool, error)
-	BlockIP(ctx context.Context, ip string, reason string, duration time.Duration) error
+	BlockIP(ctx context.Context, ip string, reason string, duration time.Duration, requestCount int) error
 	UnblockIP(ctx context.Context, ip string) error
 	GetBlockedIPs(ctx context.Context) ([]BlockedIPInfo, error)
 	RecordBlockEvent(ctx context.Context, event BlockEvent) error
@@ -38,10 +38,11 @@ type HealthCheckable interface {
 }
 
 type BlockedIPInfo struct {
-	IP        string    `json:"ip"`
-	Reason    string    `json:"reason"`
-	BlockedAt time.Time `json:"blocked_at"`
-	ExpiresAt time.Time `json:"expires_at"`
+	IP           string    `json:"ip"`
+	Reason       string    `json:"reason"`
+	BlockedAt    time.Time `json:"blocked_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	RequestCount int       `json:"request_count"` // Number of requests before blocking
 }
 
 // RedisStorage implements persistent storage with Redis
@@ -87,14 +88,15 @@ func (rs *RedisStorage) IsBlocked(ctx context.Context, ip string) (bool, error) 
 	return exists > 0, err
 }
 
-func (rs *RedisStorage) BlockIP(ctx context.Context, ip string, reason string, duration time.Duration) error {
+func (rs *RedisStorage) BlockIP(ctx context.Context, ip string, reason string, duration time.Duration, requestCount int) error {
 	key := fmt.Sprintf("blocked:%s", ip)
 	
 	info := BlockedIPInfo{
-		IP:        ip,
-		Reason:    reason,
-		BlockedAt: time.Now(),
-		ExpiresAt: time.Now().Add(duration),
+		IP:           ip,
+		Reason:       reason,
+		BlockedAt:    time.Now(),
+		ExpiresAt:    time.Now().Add(duration),
+		RequestCount: requestCount,
 	}
 
 	data, err := json.Marshal(info)
@@ -282,15 +284,16 @@ func (ms *MemoryStorage) IsBlocked(ctx context.Context, ip string) (bool, error)
 	return true, nil
 }
 
-func (ms *MemoryStorage) BlockIP(ctx context.Context, ip string, reason string, duration time.Duration) error {
+func (ms *MemoryStorage) BlockIP(ctx context.Context, ip string, reason string, duration time.Duration, requestCount int) error {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 
 	ms.blockedIPs[ip] = BlockedIPInfo{
-		IP:        ip,
-		Reason:    reason,
-		BlockedAt: time.Now(),
-		ExpiresAt: time.Now().Add(duration),
+		IP:           ip,
+		Reason:       reason,
+		BlockedAt:    time.Now(),
+		ExpiresAt:    time.Now().Add(duration),
+		RequestCount: requestCount,
 	}
 	return nil
 }

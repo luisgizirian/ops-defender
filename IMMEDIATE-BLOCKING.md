@@ -371,7 +371,7 @@ No new environment variables required. Existing settings apply:
 
 **Root Cause:** HTTP status code mismatch between Ops Defender and Nginx.
 
-**Original Issue (Fixed in v1.1):**
+**Issue:**
 - Ops Defender was returning **HTTP 404** for blocked requests
 - Nginx `error_page 403` directive only catches 403, not 404
 - Requests bypassed error handler and reached backend → crashed with HTTP 500

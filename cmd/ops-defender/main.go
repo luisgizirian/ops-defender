@@ -28,6 +28,12 @@ func main() {
 	// Initialize storage (Redis or Memory)
 	store := storage.InitStorage(cfg.RedisURL, cfg.BlockDuration)
 
+	// Parse defense features from config string
+	defenseFeatures, err := defender.ParseDefenseFeatures(cfg.DefenseFeatures)
+	if err != nil {
+		log.Fatalf("Invalid DEFENSE_FEATURES config: %v", err)
+	}
+
 	def := defender.NewDefender(defender.DefenderOptions{
 		AnalysisThreshold:    cfg.AnalysisThreshold,
 		BlockDuration:        cfg.BlockDuration,
@@ -36,6 +42,7 @@ func main() {
 		EvictionBatchPct:     cfg.EvictionBatchPct,
 		EvictionThresholdPct: cfg.EvictionThresholdPct,
 		SimulationMode:       cfg.SimulationMode,
+		DefenseFeatures:      defenseFeatures,
 	})
 
 	// Set error logger on defender (will propagate to storage if Redis)
@@ -76,6 +83,7 @@ func main() {
 	} else {
 		log.Printf("Mode: Deferred analysis (non-blocking)")
 	}
+	log.Printf("Defense features enabled: %s", defenseFeatures.String())
 	log.Printf("Reporting: Daily (9 AM) and Weekly (Monday 9 AM)")
 	log.Printf("Monitoring endpoints: /metrics (Prometheus), /timeseries (JSON), /events (SSE)")
 

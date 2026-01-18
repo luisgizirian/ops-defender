@@ -205,7 +205,7 @@ func TestDefender_ExtractIP(t *testing.T) {
 	t.Run("IPv6 storage integration", func(t *testing.T) {
 		ctx := context.Background()
 		ipv6 := "2001:db8::42"
-		err := store.BlockIP(ctx, ipv6, "test", 60*time.Minute)
+		err := store.BlockIP(ctx, ipv6, "test", 60*time.Minute, 5)
 		if err != nil {
 			t.Fatalf("Failed to block IPv6: %v", err)
 		}
@@ -222,6 +222,13 @@ func TestDefender_ExtractIP(t *testing.T) {
 
 func TestDefender_IsSuspicious(t *testing.T) {
 	store := storage.NewMemoryStorage(60 * time.Minute)
+	
+	// Parse "all" to enable all defense features for testing
+	allFeatures, err := ParseDefenseFeatures("all")
+	if err != nil {
+		t.Fatalf("Failed to parse defense features: %v", err)
+	}
+	
 	defender := NewDefender(DefenderOptions{
 		AnalysisThreshold:    100,
 		BlockDuration:        60 * time.Minute,
@@ -230,6 +237,7 @@ func TestDefender_IsSuspicious(t *testing.T) {
 		EvictionBatchPct:     0.10,
 		EvictionThresholdPct: 0.93,
 		SimulationMode:       false,
+		DefenseFeatures:      allFeatures,
 	})
 
 	tests := []struct {
@@ -898,6 +906,7 @@ func TestDefender_StaticAssetWhitelisting(t *testing.T) {
 
 func TestDefender_PartialWhitelisting(t *testing.T) {
 	store := storage.NewMemoryStorage(60 * time.Minute)
+	allFeatures, _ := ParseDefenseFeatures("all")
 	defender := NewDefender(DefenderOptions{
 		AnalysisThreshold:    5,
 		BlockDuration:        60 * time.Minute,
@@ -906,6 +915,7 @@ func TestDefender_PartialWhitelisting(t *testing.T) {
 		EvictionBatchPct:     0.10,
 		EvictionThresholdPct: 0.93,
 		SimulationMode:       false,
+		DefenseFeatures:      allFeatures,
 	})
 
 	ip := "192.168.1.51"
@@ -965,6 +975,7 @@ func TestDefender_PartialWhitelisting(t *testing.T) {
 
 func TestDefender_PathTraversalOnStaticAssets(t *testing.T) {
 	store := storage.NewMemoryStorage(60 * time.Minute)
+	allFeatures, _ := ParseDefenseFeatures("all")
 	defender := NewDefender(DefenderOptions{
 		AnalysisThreshold:    3,
 		BlockDuration:        60 * time.Minute,
@@ -973,6 +984,7 @@ func TestDefender_PathTraversalOnStaticAssets(t *testing.T) {
 		EvictionBatchPct:     0.10,
 		EvictionThresholdPct: 0.93,
 		SimulationMode:       false,
+		DefenseFeatures:      allFeatures,
 	})
 
 	ip := "192.168.1.52"
@@ -1136,6 +1148,7 @@ func TestDefender_ExcessiveURLEncodedNesting(t *testing.T) {
 
 func TestDefender_ExcessiveNesting_UnforgivingBehavior(t *testing.T) {
 	store := storage.NewMemoryStorage(60 * time.Minute)
+	allFeatures, _ := ParseDefenseFeatures("all")
 	defender := NewDefender(DefenderOptions{
 		AnalysisThreshold:    5,  // Normal threshold is 5
 		BlockDuration:        60 * time.Minute,
@@ -1144,6 +1157,7 @@ func TestDefender_ExcessiveNesting_UnforgivingBehavior(t *testing.T) {
 		EvictionBatchPct:     0.10,
 		EvictionThresholdPct: 0.93,
 		SimulationMode:       false,
+		DefenseFeatures:      allFeatures,
 	})
 
 	ip := "192.168.1.200"
