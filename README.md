@@ -68,6 +68,27 @@ This HTTP-based validation approach works with any proxy that can make authoriza
 
 ## Quick Start
 
+### Without Extensions (Core System Only)
+
+**Basic standalone usage:**
+
+```bash
+# Clone the repository
+git clone https://github.com/luisgizirian/ops-defender.git
+cd ops-defender
+
+# Build
+./scripts/build.sh
+
+# Run with default settings
+./ops-defender
+
+# Or with custom configuration
+PORT=8080 ANALYSIS_THRESHOLD=5 BLOCK_DURATION=60 ./ops-defender
+```
+
+The core system includes all defense features (pattern detection, blocking, reporting) without requiring any extensions.
+
 ### Using Dev Container (Recommended for Development)
 
 The easiest way to get started with development is using the VS Code Dev Container, which provides a fully configured development environment with Go, Azure CLI, Docker, and all required tools.
@@ -101,7 +122,7 @@ code .
 
 # 6. Start developing!
 go mod download
-./build.sh
+./scripts/build.sh
 ./ops-defender
 ```
 
@@ -126,7 +147,7 @@ go mod download
 git clone https://github.com/luisgizirian/ops-defender.git
 cd ops-defender
 
-# Start services
+# Start services (includes Redis)
 docker-compose up -d
 
 # Check logs
@@ -139,21 +160,31 @@ curl http://localhost:8080/stats
 curl http://localhost:8080/report
 ```
 
-### Manual Build
+### Manual Build (Without Docker)
 
 ```bash
 # Prerequisites: Go 1.25+
 go version
 
-# Build
-./build.sh
+# Download dependencies
+go mod download
 
-# Run
+# Build
+./scripts/build.sh
+
+# Run without Redis (in-memory mode)
 ./ops-defender
+
+# Or with Redis for persistence
+REDIS_URL=redis://localhost:6379/0 ./ops-defender
 
 # Or with custom configuration
 PORT=8080 ANALYSIS_THRESHOLD=5 BLOCK_DURATION=60 ./ops-defender
 ```
+
+**Build outputs:**
+- Binary: `ops-defender` (current directory)
+- No extensions required - full functionality included
 
 ## Configuration
 
@@ -1130,6 +1161,216 @@ curl -H "X-Real-IP: 192.168.1.200" \
 - Monitor Redis sorted set size: `redis-cli ZCARD block_events`
 - See **[MEMORY-PRESSURE-FIX.md](MEMORY-PRESSURE-FIX.md)** for details on the fix
 - Health checks run every 5 minutes and will log warnings if thresholds exceeded
+
+## Extension System
+
+Ops Defender provides a **RequestPreHandler** extensibility point that allows external code to intercept and process requests before the core defense logic executes. This enables building custom filtering logic without modifying the core system.
+
+### Use Cases
+
+The extension system enables various custom behaviors. Examples include:
+- Geographic-based request handling
+- Custom authentication integrations
+- Request transformation or enrichment
+
+### How It Works
+
+**Extension Execution Flow:**
+
+1. Request arrives at `/check` endpoint
+2. **Pre-handlers invoked** in registration order (BEFORE any core processing)
+3. If any pre-handler returns `ShouldBypass=true`:
+   - Request bypasses all core logic (no tracking, no analysis, no blocking)
+   - HTTP 200 (allow) returned immediately
+   - Reason logged for debugging
+4. If all pre-handlers pass (or none registered):
+   - Normal core processing continues (pattern matching, blocking, etc.)
+
+**Key Characteristics:**
+- **Zero core code modifications** required
+- **Fail-open by default** - extension errors don't block requests
+- **Performance-optimized** - minimal lock contention
+- **Ordered execution** - handlers run in registration order
+- **Duplicate prevention** - same extension can't be registered twice
+
+### Creating an Extension
+
+Extensions must implement the `RequestPreHandler` interface from `internal/extensions`:
+
+```go
+package extensions
+
+type RequestPreHandler interface {
+    // PreHandleRequest inspects a request and decides whether to bypass core processing
+    PreHandleRequest(request RequestInfo) (PreHandlerResult, error)
+    
+    // Name returns a unique identifier for this extension
+    Name() string
+}
+
+type RequestInfo struct {
+    IP        string              // Client IP address
+    URI       string              // Requested URI
+    UserAgent string              // User-Agent header
+    Headers   map[string][]string // All HTTP headers
+    Method    string              // HTTP method
+}
+
+type PreHandlerResult struct {
+    ShouldBypass bool   // If true, skip all core processing
+    Reason       string // Optional reason for logging
+}
+```
+
+**Example Extension:**
+
+```go
+package myextension
+
+import "github.com/ops/defender/internal/extensions"
+
+type CustomFilter struct {
+    allowedIPs map[string]bool
+}
+
+func NewCustomFilter(ips []string) *CustomFilter {
+    allowed := make(map[string]bool)
+    for _, ip := range ips {
+        allowed[ip] = true
+    }
+    return &CustomFilter{allowedIPs: allowed}
+}
+
+func (f *CustomFilter) Name() string {
+    return "custom-filter"
+}
+
+func (f *CustomFilter) PreHandleRequest(req extensions.RequestInfo) (extensions.PreHandlerResult, error) {
+    // Check if IP should bypass
+    if f.allowedIPs[req.IP] {
+        return extensions.PreHandlerResult{
+            ShouldBypass: true,
+            Reason:       "custom filter allowlist",
+        }, nil
+    }
+    
+    // Continue normal processing
+    return extensions.PreHandlerResult{ShouldBypass: false}, nil
+}
+```
+
+### Registering Extensions
+
+Extensions are registered with the `Defender` instance using `RegisterExtension()`:
+
+```go
+package main
+
+import (
+    "github.com/ops/defender/internal/defender"
+    "myextension"
+)
+
+func main() {
+    // Create defender
+    d := defender.NewDefender(defender.DefenderOptions{...})
+    
+    // Create and register extension
+    filter := myextension.NewCustomFilter([]string{"10.0.0.1", "192.168.1.1"})
+    d.RegisterExtension(filter)
+    
+    // Start server...
+}
+```
+
+**Registration Notes:**
+- Extensions can be registered **at any time** (thread-safe)
+- Duplicate registrations (same `Name()`) are **ignored with warning**
+- Nil extensions are **ignored with warning**
+- Extensions with empty names are **ignored with warning**
+
+### Extension Guidelines
+
+**Performance Considerations:**
+- Keep `PreHandleRequest()` **fast** - it runs on the critical request path
+- Avoid blocking I/O or heavy computation
+- Pre-load any required data during extension initialization
+- Use in-memory lookups (maps, caches) instead of database queries
+
+**Error Handling:**
+- **Fail-open**: Errors don't block requests (logged and ignored)
+- Return meaningful error messages for debugging
+- Don't panic - use proper error returns
+
+**Thread Safety:**
+- `PreHandleRequest()` may be called **concurrently** from multiple goroutines
+- Ensure all shared state is properly synchronized
+- Read-only data structures are preferred
+
+**Logging:**
+- Bypass decisions are **automatically logged** by core system
+- Add custom logging inside your extension if needed
+- Use structured logging for better observability
+
+### Extension Development Workflow
+
+**Recommended pattern for private extensions:**
+
+1. **Separate repository** for extension code (e.g., `ops-defender-extensions`)
+2. **Import core types** from `github.com/ops/defender/internal/extensions`
+3. **Unit test** extension logic independently
+4. **Integration test** with Ops Defender using multi-root workspace (see dev container guide)
+5. **Register extension** in `main.go` or via plugin pattern
+
+**Example Multi-Root Workspace Setup:**
+
+```bash
+# Clone both repositories
+git clone https://github.com/luisgizirian/ops-defender.git
+git clone https://github.com/your-org/ops-defender-extensions.git
+
+# Create workspace
+# File > Add Folder to Workspace (add both folders)
+# File > Save Workspace As... → ops-defender-workspace.code-workspace
+
+# Use devcontainer from ops-defender repo
+# Extensions can reference core types via Go modules
+```
+
+See [.devcontainer/README.md](.devcontainer/README.md) for comprehensive multi-repo development setup.
+
+### Extension Observability
+
+**Logs:**
+- Extension registration: `Registered extension: <name> (total extensions: N)`
+- Extension errors: `Extension '<name>' returned error, continuing: <error>`
+- Bypass decisions: `Request bypassed by extension '<name>': IP=..., URI=..., Reason=...`
+
+**Metrics:**
+- Bypassed requests **don't appear** in `total_requests` or any blocking metrics
+- Use custom metrics in your extension if tracking is needed
+
+**Debugging:**
+- Check logs for extension registration confirmation
+- Verify `Name()` returns unique identifier
+- Test extension logic independently with unit tests
+- Use `log.Printf()` inside extension for temporary debugging
+
+### Extension Security
+
+**Important Security Considerations:**
+
+- **Trust boundary**: Extensions run with **full Ops Defender privileges**
+- **Input validation**: Always validate `RequestInfo` data before use
+- **Allowlist carefully**: Bypassed requests skip ALL security checks
+- **Audit extensions**: Review extension code before production deployment
+- **Minimize bypass**: Only bypass when absolutely necessary
+
+**Best Practices:**
+- Use **strict matching** (exact IP, not IP ranges if possible)
+- **Log all bypass decisions** for audit trail
+- **Limit extension scope** to specific well-defined use cases
+- **Test thoroughly** including malicious input scenarios
 
 ## Documentation
 

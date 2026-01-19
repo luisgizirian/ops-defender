@@ -49,6 +49,85 @@ Ops Defender is a high-performance **HTTP-based** request monitoring service des
 
 ## Critical Architecture Concepts
 
+### Extension System
+
+Ops Defender provides a **RequestPreHandler** extensibility point for intercepting requests before core processing:
+
+**Architecture:**
+- **Interface**: `internal/extensions/extensions.go` - Defines `RequestPreHandler` interface
+- **Registration**: `Defender.RegisterExtension()` - Thread-safe registration method
+- **Invocation**: First code executed in `CheckRequest()`, before any tracking or analysis
+
+**Execution Flow:**
+```go
+// In CheckRequest():
+1. Extract IP/URI from request
+2. INVOKE PRE-HANDLERS (extension point) ← NEW
+3. If extension returns ShouldBypass=true → return 200, skip all processing
+4. Otherwise: Continue with normal flow (blocking checks, analysis, etc.)
+```
+
+**Key Design Principles:**
+- **Zero core modifications** - Extensions are external packages
+- **Fail-open** - Extension errors don't block requests
+- **Performance-first** - Minimal lock contention, optimized execution path
+- **Ordered execution** - Handlers run in registration order
+- **Bypass before tracking** - Bypassed requests don't appear in any metrics
+
+**When to Use:**
+- Custom filtering logic (e.g., allowlists) that should bypass ALL core checks
+- Application-specific request preprocessing
+- Integration with external authorization systems
+
+**When NOT to Use:**
+- Modifying core blocking behavior (use pattern configuration instead)
+- Adding new attack pattern detection (add to `suspiciousPatterns` in defender.go)
+- Metrics/logging only (use telemetry or events instead)
+
+**Implementation Guidelines:**
+- Keep `PreHandleRequest()` **fast** - runs on critical request path
+- Avoid blocking I/O or expensive computation
+- Use in-memory data structures (maps, caches)
+- Handle errors gracefully (fail-open behavior)
+- Thread-safe: method may be called concurrently
+
+**Example Extension:**
+```go
+type CustomFilter struct {
+    excludedIPs map[string]bool
+}
+
+func (f *CustomFilter) PreHandleRequest(req extensions.RequestInfo) (extensions.PreHandlerResult, error) {
+    if f.excludedIPs[req.IP] {
+        return extensions.PreHandlerResult{
+            ShouldBypass: true,
+            Reason:       "custom exclusion",
+        }, nil
+    }
+    return extensions.PreHandlerResult{ShouldBypass: false}, nil
+}
+
+func (f *CustomFilter) Name() string { return "custom-filter" }
+```
+
+**Adding New Extensions:**
+1. Create extension package (separate repo or `internal/extensions/<name>`)
+2. Implement `RequestPreHandler` interface
+3. Register in `main.go`: `defender.RegisterExtension(extension)`
+4. Unit test extension logic independently
+5. Integration test with Ops Defender (use multi-root workspace)
+
+**Observability:**
+- Registration: `Registered extension: <name> (total extensions: N)`
+- Errors: `Extension '<name>' returned error, continuing: <error>`
+- Bypass: `Request bypassed by extension '<name>': IP=..., URI=..., Reason=...`
+
+**Security Notes:**
+- Extensions run with full Ops Defender privileges
+- Bypassed requests skip ALL security checks (including blocking)
+- Review extension code carefully before production deployment
+- Use strict matching, avoid broad bypass rules
+
 ### Three-Tier Caching System
 
 Ops Defender uses layered caching to minimize latency and Redis calls:
@@ -304,6 +383,65 @@ code .
 
 **When modifying devcontainer:**
 - Update `.devcontainer/README.md` with changes
+- Test rebuild: F1 → "Dev Containers: Rebuild Container"
+- Ensure Docker-in-Docker remains functional for container debugging
+
+**Multi-Root Workspace for Extensions:**
+
+When developing private extensions alongside core system:
+
+```bash
+# Clone both repos
+git clone https://github.com/luisgizirian/ops-defender.git
+git clone https://github.com/your-org/ops-defender-extensions.git
+
+# Create multi-root workspace in VS Code
+# File > Add Folder to Workspace (add both folders)
+# File > Save Workspace As... → ops-defender.code-workspace
+
+# Reopen in container
+# Devcontainer from ops-defender repo will be used
+# Extensions can import core types via Go modules
+```
+
+See `.devcontainer/README.md` for comprehensive development container guide.
+
+## Project Structure & Responsibilities
+
+```
+main.go              - HTTP server, route handlers, environment config, monitoring integration
+defender.go          - Core defense logic, pattern analysis, three-tier cache, extension system
+storage.go           - Storage abstraction (Redis + in-memory fallback)
+reporter.go          - Scheduled reports (daily/weekly), email notifications
+metrics.go           - Prometheus/OpenMetrics endpoint, time-series data
+events.go            - Server-Sent Events (SSE) for real-time monitoring
+telemetry.go         - Azure Application Insights integration
+extensions.go        - Extension system interface definitions
+test-attacks.sh      - End-to-end attack detection validation
+load-test.sh         - Performance testing with mixed traffic
+defender_test.go     - Unit tests for pattern detection
+.devcontainer/       - VS Code dev container configuration
+.vscode/             - VS Code debugging and settings (launch.json, settings.json)
+examples/            - Monitoring configurations, dashboards, integration guides
+internal/extensions/ - Extension system interfaces and utilities
+```
+
+### File-Specific Conventions
+
+**extensions.go** (`internal/extensions/`):
+- Defines `RequestPreHandler` interface for all extensions
+- Contains `RequestInfo` and `PreHandlerResult` types
+- Helper function `RequestInfoFromHTTP()` for creating RequestInfo from http.Request
+- **Do not add business logic here** - keep it pure interface definitions
+- Extensions implementing this interface should be in separate packages/repos
+
+**defender.go:**
+- All blocking logic must go through storage interface (Redis/memory)
+- Pattern detection uses pre-compiled regex in `suspiciousPatterns`
+- New attack patterns: Add to `patterns` slice in `NewDefender()`
+- Block events must be recorded via `storage.RecordBlockEvent()` for reporting
+- **Extension invocation** happens at start of `CheckRequest()`, before any core logic
+- `RegisterExtension()` method for thread-safe extension registration
 - Test rebuild: F1 → "Dev Containers: Rebuild Container"
 - Ensure Docker-in-Docker remains functional for container debugging
 
