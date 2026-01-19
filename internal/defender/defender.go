@@ -838,18 +838,31 @@ func (d *Defender) cleanupExpired() {
 		cachedBlocked := len(d.blockedCache)
 		d.mu.Unlock()
 
-		// Get blocked IPs count from storage
+		// Get blocked IPs count from storage (now uses RLock, won't block request path)
 		ctx := context.Background()
 		blockedIPs, err := d.storage.GetBlockedIPs(ctx)
+		blockedIPCount := 0
 		if err != nil {
 			log.Printf("Cleanup completed: %d active IPs, %d cached blocked IPs", inMemory, cachedBlocked)
 		} else {
+			blockedIPCount = len(blockedIPs)
 			log.Printf("Cleanup completed: %d active IPs, %d cached blocked, %d total in storage",
-				inMemory, cachedBlocked, len(blockedIPs))
+				inMemory, cachedBlocked, blockedIPCount)
 		}
 
-		// Health check: Monitor block events storage size
+		// Health check and cleanup for storage
 		if healthCheckable, ok := d.storage.(storage.HealthCheckable); ok {
+			// Clean up expired blocked IPs from storage (uses write lock but separate from reads)
+			removedIPs, cleanupErr := healthCheckable.CleanupExpiredBlockedIPs(ctx)
+			if cleanupErr != nil {
+				if d.errorLogger != nil {
+					d.errorLogger.LogError("CLEANUP", "Failed to cleanup expired blocked IPs", cleanupErr)
+				}
+			} else if removedIPs > 0 {
+				log.Printf("Cleaned up %d expired blocked IPs from storage", removedIPs)
+			}
+
+			// Monitor block events storage size
 			eventsCount, err := healthCheckable.GetBlockEventsCount(ctx)
 			if err != nil {
 				if d.errorLogger != nil {
@@ -857,15 +870,16 @@ func (d *Defender) cleanupExpired() {
 				}
 			} else {
 				// Determine storage type and appropriate thresholds
-				// MemoryStorage self-limits at 1000 events, Redis can grow unbounded
+				// MemoryStorage self-limits at 900 events, Redis can grow unbounded
 				storageType := d.storage.StorageType()
 				warnThreshold := int64(5000)
 				criticalThreshold := int64(10000)
 
 				if storageType == "memory" {
-					// MemoryStorage: adjust thresholds (it self-limits at 1000)
-					warnThreshold = 800
-					criticalThreshold = 950
+					// MemoryStorage: adjust thresholds (it self-limits at 900)
+					// These should never trigger since storage caps at 900
+					warnThreshold = 850
+					criticalThreshold = 900
 				}
 
 				// Warn if event storage is growing too large
