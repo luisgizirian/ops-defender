@@ -51,9 +51,9 @@ Ops Defender runs as a **standalone HTTP service** designed to integrate with **
 
 **HTTP-Based Request Flow:**
 
-1. **Proxy forwards request** to Ops Defender `/check` endpoint (via HTTP)
+1. **Proxy forwards request** to Ops Defender `/check` endpoint (via HTTP) Note: When forwarding requests, the request body is excluded
 2. **Immediate check** for unforgiving patterns (excessive nesting):
-   - **First malicious request** → blocked immediately (HTTP 403/404)
+   - **First malicious request** → blocked immediately (HTTP 403)
    - Prevents backend from processing dangerous URLs
 3. **Deferred analysis** for other patterns:
    - **First ~5 requests** from any IP are **allowed through** (return 200 OK)
@@ -1120,7 +1120,7 @@ See [DDOS-DEFENSE.md](DDOS-DEFENSE.md) for detailed analysis of DDoS protection 
 
 ### Test 11 (test-attacks.sh) Fails - Expected Behavior
 
-**Symptom:** Test 11 "Legitimate Request" returns 403/404 when accessing `/api/users`
+**Symptom:** Test 11 "Legitimate Request" returns 403 when accessing `/api/users`
 
 **Explanation:** This is **not a bug**. Ops Defender is an auth validation service, not an application server. It only implements:
 - `/check` - Auth validation endpoint (for Nginx)
@@ -1131,7 +1131,7 @@ See [DDOS-DEFENSE.md](DDOS-DEFENSE.md) for detailed analysis of DDoS protection 
 **Why the test is misleading:**
 ```bash
 # Current test (incorrect):
-curl http://localhost:8080/api/users  # Returns 403/404 (not a valid endpoint)
+curl http://localhost:8080/api/users  # Returns 403 (not a valid endpoint)
 
 # Correct approach:
 curl -H "X-Real-IP: 192.168.1.200" \
