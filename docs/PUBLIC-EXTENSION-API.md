@@ -2,32 +2,38 @@
 
 **Date:** January 20, 2026  
 **Status:** ✅ Complete  
-**Version:** 1.1
+**Version:** 2.0
 
 ## Summary
 
-Moved the extension system from `internal/extensions/` to **public `pkg/extensions/` package** to enable external modules to import and implement custom extensions.
+Moved the extension system packages to **public `pkg/` directory** to enable external modules to import and implement custom extensions:
+- `internal/extensions/` → `pkg/extensions/` (extension interfaces)
+- `internal/config/` → `pkg/config/` (configuration types)
 
 ## Problem
 
-The extension interfaces were in `internal/extensions/`, which **cannot be imported** from outside the Ops Defender module due to Go's `internal/` package visibility rules.
+The extension interfaces and config types were in `internal/`, which **cannot be imported** from outside the Ops Defender module due to Go's `internal/` package visibility rules.
 
 External developers could not:
 ```go
-// ❌ This would fail to compile:
+// ❌ These would fail to compile:
 import "github.com/ops/defender/internal/extensions"
+import "github.com/ops/defender/internal/config"
 ```
 
 ## Solution
 
-Created **public `pkg/extensions/` package** that external modules can import:
+Created **public `pkg/extensions/` and `pkg/config/` packages** that external modules can import:
 
 ```go
 // ✅ External modules can now do this:
-import "github.com/ops/defender/pkg/extensions"
+import (
+    "github.com/ops/defender/pkg/extensions"
+    "github.com/ops/defender/pkg/config"
+)
 
 type MyExtension struct {
-    // custom fields
+    blockDuration time.Duration
 }
 
 func (e *MyExtension) PreHandleRequest(req extensions.RequestInfo) (extensions.PreHandlerResult, error) {
@@ -41,27 +47,41 @@ func (e *MyExtension) Name() string {
 
 ## Changes Made
 
-### 1. Created Public Package
+### 1. Created Public Packages
 
 **New files:**
-- `/workspace/pkg/extensions/extensions.go` - Public extension interfaces
-- `/workspace/pkg/extensions/extensions_test.go` - Test examples
+- `pkg/extensions/extensions.go` - Public extension interfaces
+- `pkg/extensions/extensions_test.go` - Test examples
+- `pkg/config/config.go` - Configuration types (needed by extensions)
 
 **Public API:**
-- `RequestPreHandler` interface
-- `RequestInfo` struct
-- `PreHandlerResult` struct
-- `RequestInfoFromHTTP()` helper function
+- `extensions.RequestPreHandler` interface
+- `extensions.RequestInfo` struct
+- `extensions.PreHandlerResult` struct
+- `extensions.RequestInfoFromHTTP()` helper function
+- `config.Config` struct with all configuration settings
 
 ### 2. Updated Imports
 
-Updated all imports from `internal/extensions` to `pkg/extensions`:
+Updated all imports from `internal/` to `pkg/`:
 
 - ✅ `internal/defender/defender.go`
 - ✅ `internal/defender/defender_test.go`
+- ✅ `cmd/ops-defender/main.go`
+- ✅ `internal/reporter/reporter.go`
 - ✅ `README.md` (multiple examples)
-- ✅ `examples/EXTENSION-EXAMPLE.md`
-- ✅ `.github/copilot-instructions.md`
+
+### 3. Removed Old Internal Packages
+
+**Deleted directories:**
+- ❌ `internal/extensions/` (completely removed)
+- ❌ `internal/config/` (completely removed)
+
+**Remaining internal packages:**
+- ✅ `internal/defender/` (implementation details, stays internal)
+- ✅ `internal/logger/` (implementation details, stays internal)
+- ✅ `internal/reporter/` (implementation details, stays internal)
+- ✅ `internal/storage/` (implementation details, stays internal)
 
 ### 3. Documentation
 
@@ -94,14 +114,18 @@ Updated all imports from `internal/extensions` to `pkg/extensions`:
 ```
 ops-defender/
 ├── pkg/
-│   └── extensions/          # ← NEW: Public API (importable by external modules)
-│       ├── extensions.go
-│       └── extensions_test.go
+│   ├── extensions/          # ✅ Public API (importable by external modules)
+│   │   ├── extensions.go
+│   │   └── extensions_test.go
+│   └── config/              # ✅ Public API (configuration types)
+│       └── config.go
 ├── internal/
-│   ├── defender/            # ← Updated imports to use pkg/extensions
-│   └── extensions/          # ← OLD: Can be removed in future cleanup
-└── examples/
-    └── external-extension/  # ← NEW: External extension guide
+│   ├── defender/            # Implementation details (stays internal)
+│   ├── logger/              # Implementation details (stays internal)
+│   ├── reporter/            # Implementation details (stays internal)
+│   └── storage/             # Implementation details (stays internal)
+└── cmd/
+    └── ops-defender/        # Main application
 ```
 
 ## For External Developers
@@ -123,7 +147,10 @@ go get github.com/ops/defender
 ```go
 package myext
 
-import "github.com/ops/defender/pkg/extensions"
+import (
+    "github.com/ops/defender/pkg/extensions"
+    "github.com/ops/defender/pkg/config"
+)
 
 type MyExtension struct{}
 
@@ -164,27 +191,31 @@ func main() {
 ```go
 // ❌ Won't work for external modules
 import "github.com/ops/defender/internal/extensions"
+import "github.com/ops/defender/internal/config"
 ```
 
 ### New Code (Public Package)
 ```go
 // ✅ Works for all external modules
 import "github.com/ops/defender/pkg/extensions"
+import "github.com/ops/defender/pkg/config"
 ```
 
 ### No Breaking Changes
 
 - All internal Ops Defender code updated automatically
-- Old `internal/extensions/` package still exists (can be removed later)
+- Old `internal/extensions/` and `internal/config/` packages **removed** (migration complete)
 - Backward compatible - no API changes to interfaces
 
-## Future Cleanup
+## Migration Complete
 
-Optional cleanup tasks (not required for functionality):
+✅ **All migration tasks completed:**
 
-1. **Remove old internal/extensions/** - No longer needed since code moved to pkg/
-2. **Add go.mod examples** - Show minimal external extension module setup
-3. **CI/CD testing** - Test external extension compilation in CI pipeline
+1. ✅ **Created public packages** - `pkg/extensions/` and `pkg/config/`
+2. ✅ **Updated all imports** - All files now use `pkg/` imports
+3. ✅ **Removed old packages** - `internal/extensions/` and `internal/config/` deleted
+4. ✅ **Tests passing** - All tests successful with new structure
+5. ✅ **Build successful** - Code compiles with new imports
 
 ## Testing Checklist
 

@@ -4,11 +4,11 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/ops/defender/internal/config"
 	"github.com/ops/defender/internal/defender"
 	"github.com/ops/defender/internal/logger"
 	"github.com/ops/defender/internal/reporter"
 	"github.com/ops/defender/internal/storage"
+	"github.com/ops/defender/pkg/config"
 )
 
 func main() {

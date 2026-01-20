@@ -1195,11 +1195,14 @@ The extension system enables various custom behaviors. Examples include:
 
 ### Creating an Extension
 
-**Public API:** Extensions are implemented using the **public `pkg/extensions` package**, which can be imported by any external Go module.
+**Public API:** Extensions are implemented using the **public `pkg/extensions` and `pkg/config` packages**, which can be imported by any external Go module.
 
 ```go
-// Import the public extensions package
-import "github.com/ops/defender/pkg/extensions"
+// Import the public packages
+import (
+    "github.com/ops/defender/pkg/extensions"
+    "github.com/ops/defender/pkg/config"  // Configuration types
+)
 
 // Implement the RequestPreHandler interface
 type RequestPreHandler interface {
