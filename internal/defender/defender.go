@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ops/defender/internal/extensions"
 	"github.com/ops/defender/internal/storage"
+	"github.com/ops/defender/pkg/extensions"
 )
 
 const (
@@ -64,16 +64,16 @@ type Defender struct {
 	analysisChan             chan string
 	totalRequests            int64
 	blockedRequests          int64
-	whitelistedRequests      int64                 // Counter for whitelisted static asset requests
-	pathTraversalBlocks      int64                 // Counter for blocks due to path traversal
-	excessiveNestingBlocks   int64                 // Counter for blocks due to excessive URL-encoded nesting
-	suspiciousBlocks         int64                 // Counter for blocks due to suspicious patterns
-	repeatBlockedRequests    int64                 // Counter for requests from already-blocked IPs (cached blocks)
-	maxTrackedIPs            int                   // Maximum number of IPs to track simultaneously
-	droppedIPs               int64                 // Counter for IPs dropped due to memory limits
-	evictionBatchPct         float64               // Percentage of IPs to evict in bulk (default 0.10 = 10%)
-	evictionInProgress       bool                  // Flag to prevent concurrent evictions
-	evictionThreshold        int                   // Preemptive eviction threshold (e.g., 90% of max)
+	whitelistedRequests      int64                          // Counter for whitelisted static asset requests
+	pathTraversalBlocks      int64                          // Counter for blocks due to path traversal
+	excessiveNestingBlocks   int64                          // Counter for blocks due to excessive URL-encoded nesting
+	suspiciousBlocks         int64                          // Counter for blocks due to suspicious patterns
+	repeatBlockedRequests    int64                          // Counter for requests from already-blocked IPs (cached blocks)
+	maxTrackedIPs            int                            // Maximum number of IPs to track simultaneously
+	droppedIPs               int64                          // Counter for IPs dropped due to memory limits
+	evictionBatchPct         float64                        // Percentage of IPs to evict in bulk (default 0.10 = 10%)
+	evictionInProgress       bool                           // Flag to prevent concurrent evictions
+	evictionThreshold        int                            // Preemptive eviction threshold (e.g., 90% of max)
 	simulationMode           bool                           // When true, log blocks but don't actually block requests
 	telemetry                *AppInsightsTelemetry          // Azure Application Insights telemetry
 	eventStream              *EventStream                   // Real-time event stream
