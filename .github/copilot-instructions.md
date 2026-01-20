@@ -428,11 +428,12 @@ internal/extensions/ - Extension system interfaces and utilities
 
 ### File-Specific Conventions
 
-**extensions.go** (`internal/extensions/`):
+**extensions.go** (`pkg/extensions/`):
 - Defines `RequestPreHandler` interface for all extensions
 - Contains `RequestInfo` and `PreHandlerResult` types
 - Helper function `RequestInfoFromHTTP()` for creating RequestInfo from http.Request
 - **Do not add business logic here** - keep it pure interface definitions
+- **Public package** - can be imported by external modules to implement extensions
 - Extensions implementing this interface should be in separate packages/repos
 
 **defender.go:**

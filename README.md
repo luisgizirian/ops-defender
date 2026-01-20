@@ -1195,11 +1195,13 @@ The extension system enables various custom behaviors. Examples include:
 
 ### Creating an Extension
 
-Extensions must implement the `RequestPreHandler` interface from `internal/extensions`:
+**Public API:** Extensions are implemented using the **public `pkg/extensions` package**, which can be imported by any external Go module.
 
 ```go
-package extensions
+// Import the public extensions package
+import "github.com/ops/defender/pkg/extensions"
 
+// Implement the RequestPreHandler interface
 type RequestPreHandler interface {
     // PreHandleRequest inspects a request and decides whether to bypass core processing
     PreHandleRequest(request RequestInfo) (PreHandlerResult, error)
@@ -1227,7 +1229,7 @@ type PreHandlerResult struct {
 ```go
 package myextension
 
-import "github.com/ops/defender/internal/extensions"
+import "github.com/ops/defender/pkg/extensions"
 
 type CustomFilter struct {
     allowedIPs map[string]bool
@@ -1317,7 +1319,7 @@ func main() {
 **Recommended pattern for private extensions:**
 
 1. **Separate repository** for extension code (e.g., `ops-defender-extensions`)
-2. **Import core types** from `github.com/ops/defender/internal/extensions`
+2. **Import core types** from `github.com/ops/defender/pkg/extensions`
 3. **Unit test** extension logic independently
 4. **Integration test** with Ops Defender using multi-root workspace (see dev container guide)
 5. **Register extension** in `main.go` or via plugin pattern

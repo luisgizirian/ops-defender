@@ -18,8 +18,8 @@ import (
 
     "github.com/ops/defender/internal/config"
     "github.com/ops/defender/internal/defender"
-    "github.com/ops/defender/internal/extensions"
     "github.com/ops/defender/internal/storage"
+    "github.com/ops/defender/pkg/extensions"
 )
 
 // RequestLoggerExtension logs additional request information
