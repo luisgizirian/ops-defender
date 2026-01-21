@@ -1164,7 +1164,14 @@ curl -H "X-Real-IP: 192.168.1.200" \
 
 ## Extension System
 
-Ops Defender provides a **RequestPreHandler** extensibility point that allows external code to intercept and process requests before the core defense logic executes. This enables building custom filtering logic without modifying the core system.
+Ops Defender provides **two extensibility points** that allow external code to customize behavior without modifying the core system:
+
+1. **RequestPreHandler** - Intercept requests **before** processing (early bypass)
+2. **PatternAnalyzer** - Inject custom pattern detection **during** deferred analysis (NEW)
+
+### Extension Point 1: RequestPreHandler (Pre-Request Bypass)
+
+Allows external code to intercept and process requests before the core defense logic executes. This enables building custom filtering logic without modifying the core system.
 
 ### Use Cases
 
@@ -1370,6 +1377,192 @@ See [.devcontainer/README.md](.devcontainer/README.md) for comprehensive multi-r
 - **Allowlist carefully**: Bypassed requests skip ALL security checks
 - **Audit extensions**: Review extension code before production deployment
 - **Minimize bypass**: Only bypass when absolutely necessary
+
+**Best Practices:**
+- Use **strict matching** (exact IP, not IP ranges if possible)
+- **Log all bypass decisions** for audit trail
+- **Limit extension scope** to specific well-defined use cases
+- **Test thoroughly** including malicious input scenarios
+
+### Extension Point 2: PatternAnalyzer (Deferred Analysis)
+
+**NEW:** Allows custom pattern detection logic to run during deferred analysis, after requests are logged but before the block decision is made.
+
+**Use Cases:**
+- Custom attack pattern detection (SQL injection, XSS, etc.)
+- Domain-specific security rules
+- Machine learning-based anomaly detection
+- Integration with threat intelligence feeds
+
+**Execution Flow:**
+
+1. IP reaches analysis threshold (default: 5 requests)
+2. Analysis worker invoked with request history
+3. **Built-in checks run** (path traversal, nesting, etc.)
+4. **PatternAnalyzers invoked** in priority order
+5. First analyzer returning `IsSuspicious=true` triggers block
+6. IP blocked for configured duration
+
+**Interface Definition:**
+
+```go
+// Import the public extensions package
+import "github.com/ops/defender/pkg/extensions"
+
+type PatternAnalyzer interface {
+    // AnalyzePattern inspects request history and returns suspicion verdict
+    AnalyzePattern(ctx AnalysisContext) (AnalysisResult, error)
+    
+    // Name returns unique identifier
+    Name() string
+    
+    // Priority returns execution order (0=highest, 100=lowest, default 50)
+    Priority() int
+}
+
+type AnalysisContext struct {
+    IP           string        // IP being analyzed
+    RequestLogs  []RequestLog  // All logged requests from this IP
+    RequestCount int           // Total request count
+    FirstSeen    time.Time     // First request timestamp
+    LastSeen     time.Time     // Last request timestamp
+}
+
+type RequestLog struct {
+    URI           string
+    Timestamp     time.Time
+    UserAgent     string
+    IsWhitelisted bool
+    Method        string
+}
+
+type AnalysisResult struct {
+    IsSuspicious  bool    // True if suspicious pattern detected
+    Reason        string  // Human-readable reason
+    SuspiciousURI string  // Specific URI that triggered detection
+    Confidence    float64 // Confidence score 0.0-1.0 (optional)
+}
+```
+
+**Example: SQL Injection Detector**
+
+```go
+package myanalyzer
+
+import (
+    "regexp"
+    "github.com/ops/defender/pkg/extensions"
+)
+
+type SQLInjectionDetector struct {
+    patterns []*regexp.Regexp
+}
+
+func NewSQLInjectionDetector() *SQLInjectionDetector {
+    return &SQLInjectionDetector{
+        patterns: []*regexp.Regexp{
+            regexp.MustCompile(`(?i)(union\s+select|union\s+all\s+select)`),
+            regexp.MustCompile(`(?i)(select.*from|insert\s+into)`),
+            // ... more patterns
+        },
+    }
+}
+
+func (d *SQLInjectionDetector) AnalyzePattern(ctx extensions.AnalysisContext) (extensions.AnalysisResult, error) {
+    for _, log := range ctx.RequestLogs {
+        for _, pattern := range d.patterns {
+            if pattern.MatchString(log.URI) {
+                return extensions.AnalysisResult{
+                    IsSuspicious:  true,
+                    Reason:        "SQL injection pattern detected",
+                    SuspiciousURI: log.URI,
+                    Confidence:    0.95,
+                }, nil
+            }
+        }
+    }
+    return extensions.AnalysisResult{IsSuspicious: false}, nil
+}
+
+func (d *SQLInjectionDetector) Name() string { return "sql-injection-detector" }
+func (d *SQLInjectionDetector) Priority() int { return 10 } // High priority
+```
+
+**Registering Pattern Analyzers:**
+
+```go
+package main
+
+import (
+    "github.com/ops/defender/internal/defender"
+    "myanalyzer"
+)
+
+func main() {
+    d := defender.NewDefender(defender.DefenderOptions{...})
+    
+    // Register analyzer
+    sqlDetector := myanalyzer.NewSQLInjectionDetector()
+    d.RegisterPatternAnalyzer(sqlDetector)
+    
+    // Start server...
+}
+```
+
+**Priority System:**
+
+Analyzers are executed in priority order (lower value = higher priority):
+
+- **0-10**: Critical checks (run first)
+- **11-50**: Standard checks
+- **51-100**: Exploratory checks (run last)
+
+Use priority to ensure high-confidence analyzers run before exploratory ones.
+
+**Performance Guidelines:**
+
+- **Target execution time**: <100ms per analysis
+- **Async execution**: Runs in analysis worker (not on request path)
+- **No blocking I/O**: Avoid database calls or external APIs
+- **In-memory processing**: Use pre-compiled patterns, local caches
+- **Early exit**: Return suspicious=true as soon as high-confidence match found
+
+**Error Handling:**
+
+- **Fail-open**: Errors are logged but don't block analysis
+- **Isolation**: Analyzer errors don't affect other analyzers or core logic
+- **Observability**: All errors logged with analyzer name and IP
+
+**Testing:**
+
+```bash
+# Send legitimate requests
+for i in {1..5}; do
+  curl -H "X-Real-IP: 10.0.0.1" \
+       -H "X-Original-URI: /api/users?id=123" \
+       http://localhost:8080/check
+done
+
+# Send malicious requests (SQL injection)
+for i in {1..5}; do
+  curl -H "X-Real-IP: 10.0.0.2" \
+       -H "X-Original-URI: /api/users?id=1' OR '1'='1" \
+       http://localhost:8080/check
+done
+
+# Check if IP was blocked
+curl http://localhost:8080/stats | jq '.blocked_ips'
+```
+
+Expected log output:
+```
+Request pattern flagged by analyzer 'sql-injection-detector': IP=10.0.0.2, Reason=SQL injection pattern detected, URI=/api/users?id=1' OR '1'='1, Confidence=0.95
+IP marked as suspicious and blocked: 10.0.0.2
+```
+
+**Complete Example:**
+
+See [examples/sql-injection-detector/](examples/sql-injection-detector/) for a full implementation with confidence scoring and multiple pattern types.
 
 **Best Practices:**
 - Use **strict matching** (exact IP, not IP ranges if possible)

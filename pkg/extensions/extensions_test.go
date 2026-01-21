@@ -1,9 +1,11 @@
 package extensions
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // mockPreHandler is a test implementation of RequestPreHandler
@@ -234,3 +236,232 @@ func TestIPAllowlistExtension(t *testing.T) {
 		})
 	}
 }
+
+// Mock PatternAnalyzer for testing
+type mockPatternAnalyzer struct {
+	name              string
+	priority          int
+	shouldBeSuspicious bool
+	returnError       error
+	confidence        float64
+	reason            string
+	suspiciousURI     string
+}
+
+func (m *mockPatternAnalyzer) AnalyzePattern(ctx AnalysisContext) (AnalysisResult, error) {
+	if m.returnError != nil {
+		return AnalysisResult{}, m.returnError
+	}
+
+	return AnalysisResult{
+		IsSuspicious:  m.shouldBeSuspicious,
+		Reason:        m.reason,
+		SuspiciousURI: m.suspiciousURI,
+		Confidence:    m.confidence,
+	}, nil
+}
+
+func (m *mockPatternAnalyzer) Name() string {
+	return m.name
+}
+
+func (m *mockPatternAnalyzer) Priority() int {
+	return m.priority
+}
+
+func TestAnalysisContext(t *testing.T) {
+	now := time.Now()
+	logs := []RequestLog{
+		{
+			URI:           "/api/users",
+			Timestamp:     now,
+			UserAgent:     "agent1",
+			IsWhitelisted: false,
+			Method:        "GET",
+		},
+		{
+			URI:           "/api/products",
+			Timestamp:     now.Add(1 * time.Second),
+			UserAgent:     "agent1",
+			IsWhitelisted: false,
+			Method:        "POST",
+		},
+	}
+
+	ctx := AnalysisContext{
+		IP:           "10.0.0.1",
+		RequestLogs:  logs,
+		RequestCount: 2,
+		FirstSeen:    now,
+		LastSeen:     now.Add(1 * time.Second),
+	}
+
+	if ctx.IP != "10.0.0.1" {
+		t.Errorf("Expected IP 10.0.0.1, got %s", ctx.IP)
+	}
+
+	if ctx.RequestCount != 2 {
+		t.Errorf("Expected RequestCount 2, got %d", ctx.RequestCount)
+	}
+
+	if len(ctx.RequestLogs) != 2 {
+		t.Errorf("Expected 2 request logs, got %d", len(ctx.RequestLogs))
+	}
+
+	if ctx.RequestLogs[0].URI != "/api/users" {
+		t.Errorf("Expected first URI /api/users, got %s", ctx.RequestLogs[0].URI)
+	}
+
+	if ctx.RequestLogs[1].Method != "POST" {
+		t.Errorf("Expected second method POST, got %s", ctx.RequestLogs[1].Method)
+	}
+}
+
+func TestAnalysisResult(t *testing.T) {
+	result := AnalysisResult{
+		IsSuspicious:  true,
+		Reason:        "Test reason",
+		SuspiciousURI: "/malicious/path",
+		Confidence:    0.95,
+	}
+
+	if !result.IsSuspicious {
+		t.Error("Expected IsSuspicious to be true")
+	}
+
+	if result.Reason != "Test reason" {
+		t.Errorf("Expected Reason 'Test reason', got %s", result.Reason)
+	}
+
+	if result.SuspiciousURI != "/malicious/path" {
+		t.Errorf("Expected SuspiciousURI /malicious/path, got %s", result.SuspiciousURI)
+	}
+
+	if result.Confidence != 0.95 {
+		t.Errorf("Expected Confidence 0.95, got %.2f", result.Confidence)
+	}
+}
+
+func TestMockPatternAnalyzer_Normal(t *testing.T) {
+	analyzer := &mockPatternAnalyzer{
+		name:               "test-analyzer",
+		priority:           50,
+		shouldBeSuspicious: true,
+		confidence:         0.85,
+		reason:             "Test pattern detected",
+		suspiciousURI:      "/test/malicious",
+	}
+
+	if analyzer.Name() != "test-analyzer" {
+		t.Errorf("Expected name test-analyzer, got %s", analyzer.Name())
+	}
+
+	if analyzer.Priority() != 50 {
+		t.Errorf("Expected priority 50, got %d", analyzer.Priority())
+	}
+
+	now := time.Now()
+	ctx := AnalysisContext{
+		IP:           "10.0.0.1",
+		RequestCount: 5,
+		RequestLogs: []RequestLog{
+			{URI: "/test/malicious", Timestamp: now, Method: "GET"},
+		},
+		FirstSeen: now,
+		LastSeen:  now,
+	}
+
+	result, err := analyzer.AnalyzePattern(ctx)
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+
+	if !result.IsSuspicious {
+		t.Error("Expected IsSuspicious to be true")
+	}
+
+	if result.Confidence != 0.85 {
+		t.Errorf("Expected confidence 0.85, got %.2f", result.Confidence)
+	}
+
+	if result.Reason != "Test pattern detected" {
+		t.Errorf("Expected reason 'Test pattern detected', got %s", result.Reason)
+	}
+
+	if result.SuspiciousURI != "/test/malicious" {
+		t.Errorf("Expected SuspiciousURI '/test/malicious', got %s", result.SuspiciousURI)
+	}
+}
+
+func TestMockPatternAnalyzer_NotSuspicious(t *testing.T) {
+	analyzer := &mockPatternAnalyzer{
+		name:               "clean-analyzer",
+		priority:           10,
+		shouldBeSuspicious: false,
+		confidence:         0.10,
+	}
+
+	ctx := AnalysisContext{
+		IP:           "10.0.0.2",
+		RequestCount: 3,
+	}
+
+	result, err := analyzer.AnalyzePattern(ctx)
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+
+	if result.IsSuspicious {
+		t.Error("Expected IsSuspicious to be false")
+	}
+
+	if result.Confidence != 0.10 {
+		t.Errorf("Expected confidence 0.10, got %.2f", result.Confidence)
+	}
+}
+
+func TestMockPatternAnalyzer_Error(t *testing.T) {
+	testErr := errors.New("mock analysis error")
+	analyzer := &mockPatternAnalyzer{
+		name:        "error-analyzer",
+		priority:    10,
+		returnError: testErr,
+	}
+
+	ctx := AnalysisContext{
+		IP:           "10.0.0.1",
+		RequestCount: 5,
+	}
+
+	_, err := analyzer.AnalyzePattern(ctx)
+	if err == nil {
+		t.Error("Expected error but got nil")
+	}
+
+	if err.Error() != "mock analysis error" {
+		t.Errorf("Expected error 'mock analysis error', got %s", err.Error())
+	}
+}
+
+func TestMockPatternAnalyzer_PriorityOrdering(t *testing.T) {
+	analyzers := []PatternAnalyzer{
+		&mockPatternAnalyzer{name: "low", priority: 100},
+		&mockPatternAnalyzer{name: "high", priority: 10},
+		&mockPatternAnalyzer{name: "medium", priority: 50},
+	}
+
+	// In production, these would be sorted by RegisterPatternAnalyzer
+	// Test that priority values are correctly set
+	if analyzers[0].Priority() != 100 {
+		t.Errorf("Expected priority 100, got %d", analyzers[0].Priority())
+	}
+
+	if analyzers[1].Priority() != 10 {
+		t.Errorf("Expected priority 10, got %d", analyzers[1].Priority())
+	}
+
+	if analyzers[2].Priority() != 50 {
+		t.Errorf("Expected priority 50, got %d", analyzers[2].Priority())
+	}
+}
+
