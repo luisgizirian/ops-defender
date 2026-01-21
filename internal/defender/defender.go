@@ -79,6 +79,7 @@ type Defender struct {
 	eventStream              *EventStream                   // Real-time event stream
 	errorLogger              storage.ErrorLogger            // File-based error logger for critical issues
 	preHandlers              []extensions.RequestPreHandler // Registered extension pre-handlers (invoked before request processing)
+	patternAnalyzers         []extensions.PatternAnalyzer   // Registered pattern analyzers (invoked during deferred analysis)
 }
 
 func NewDefender(opts DefenderOptions) *Defender {
@@ -517,6 +518,11 @@ func (d *Defender) analyzeIP(ip string) {
 		}
 	}
 
+	// Invoke registered pattern analyzers (if not already suspicious)
+	if !suspicious {
+		suspicious, suspiciousURI, reason = d.invokePatternAnalyzers(ip, tracker)
+	}
+
 	// Check for high request rate in short time (excluding whitelisted static assets)
 	if !suspicious && len(tracker.RequestLogs) >= d.analysisThreshold {
 		// Count only non-whitelisted requests for rate limiting
@@ -608,6 +614,69 @@ func (d *Defender) analyzeIP(ip string) {
 	}
 
 	d.mu.Unlock()
+}
+
+// invokePatternAnalyzers calls all registered analyzers in priority order
+// Returns on first suspicious result or after all complete
+// Must be called with mutex held
+func (d *Defender) invokePatternAnalyzers(ip string, tracker *IPTracker) (bool, string, string) {
+	if len(d.patternAnalyzers) == 0 {
+		return false, "", ""
+	}
+
+	// Build analysis context (convert internal RequestLog to public type)
+	requestLogs := make([]extensions.RequestLog, len(tracker.RequestLogs))
+	var firstSeen, lastSeen time.Time
+
+	for i, log := range tracker.RequestLogs {
+		requestLogs[i] = extensions.RequestLog{
+			URI:           log.URI,
+			Timestamp:     log.Timestamp,
+			UserAgent:     log.UserAgent,
+			IsWhitelisted: log.IsWhitelisted,
+			Method:        "", // Method field available for future extension
+		}
+
+		if i == 0 {
+			firstSeen = log.Timestamp
+		}
+		lastSeen = log.Timestamp
+	}
+
+	ctx := extensions.AnalysisContext{
+		IP:           ip,
+		RequestLogs:  requestLogs,
+		RequestCount: len(requestLogs),
+		FirstSeen:    firstSeen,
+		LastSeen:     lastSeen,
+	}
+
+	// Invoke analyzers in priority order (already sorted during registration)
+	for _, analyzer := range d.patternAnalyzers {
+		result, err := analyzer.AnalyzePattern(ctx)
+
+		if err != nil {
+			// Log error but continue with other analyzers (fail-open)
+			log.Printf("Pattern analyzer '%s' returned error, continuing: %v",
+				analyzer.Name(), err)
+			continue
+		}
+
+		if result.IsSuspicious {
+			// First suspicious result triggers block
+			reason := result.Reason
+			if reason == "" {
+				reason = fmt.Sprintf("Flagged by %s", analyzer.Name())
+			}
+
+			log.Printf("Request pattern flagged by analyzer '%s': IP=%s, Reason=%s, URI=%s, Confidence=%.2f",
+				analyzer.Name(), ip, reason, result.SuspiciousURI, result.Confidence)
+
+			return true, result.SuspiciousURI, reason
+		}
+	}
+
+	return false, "", ""
 }
 
 func (d *Defender) isSuspicious(uri string) bool {
@@ -968,6 +1037,51 @@ func (d *Defender) RegisterExtension(handler extensions.RequestPreHandler) {
 
 	d.preHandlers = append(d.preHandlers, handler)
 	log.Printf("Registered extension: %s (total extensions: %d)", name, len(d.preHandlers))
+}
+
+// RegisterPatternAnalyzer registers a custom pattern analyzer for deferred analysis
+//
+// Analyzers are invoked during async analysis (after request logging) in priority order.
+// They run AFTER built-in checks but BEFORE the final block decision.
+//
+// Analyzers are sorted by priority (lower Priority() value = runs first).
+// The first analyzer returning IsSuspicious=true triggers an IP block.
+//
+// Thread-safe and can be called during defender lifecycle.
+func (d *Defender) RegisterPatternAnalyzer(analyzer extensions.PatternAnalyzer) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// Validate analyzer
+	if analyzer == nil {
+		log.Printf("WARNING: Attempted to register nil PatternAnalyzer, ignoring")
+		return
+	}
+
+	name := analyzer.Name()
+	if name == "" {
+		log.Printf("WARNING: PatternAnalyzer has empty name, ignoring registration")
+		return
+	}
+
+	// Check for duplicate registration
+	for _, existing := range d.patternAnalyzers {
+		if existing.Name() == name {
+			log.Printf("WARNING: PatternAnalyzer '%s' already registered, ignoring duplicate", name)
+			return
+		}
+	}
+
+	// Add to list
+	d.patternAnalyzers = append(d.patternAnalyzers, analyzer)
+
+	// Sort by priority (lower = higher priority)
+	sort.Slice(d.patternAnalyzers, func(i, j int) bool {
+		return d.patternAnalyzers[i].Priority() < d.patternAnalyzers[j].Priority()
+	})
+
+	log.Printf("Registered pattern analyzer: %s (priority: %d, total analyzers: %d)",
+		name, analyzer.Priority(), len(d.patternAnalyzers))
 }
 
 type Stats struct {
