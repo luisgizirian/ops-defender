@@ -9,7 +9,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/ops/defender/internal/storage"
+	"github.com/ops/defender/pkg/storage"
 )
 
 // MetricsHandler provides Prometheus/OpenMetrics format endpoint

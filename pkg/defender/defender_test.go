@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ops/defender/internal/storage"
 	"github.com/ops/defender/pkg/extensions"
+	"github.com/ops/defender/pkg/storage"
 )
 
 func TestDefender_CheckRequest_AllowsNormalRequest(t *testing.T) {

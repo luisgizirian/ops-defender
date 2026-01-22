@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
-	"github.com/ops/defender/internal/defender"
 	"github.com/ops/defender/pkg/config"
+	"github.com/ops/defender/pkg/defender"
 )
 
 type ReportScheduler struct {

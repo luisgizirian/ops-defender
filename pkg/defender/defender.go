@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ops/defender/internal/storage"
 	"github.com/ops/defender/pkg/extensions"
+	"github.com/ops/defender/pkg/storage"
 )
 
 const (
