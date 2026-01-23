@@ -1,5 +1,6 @@
 # Binaries
 /ops-defender
+/examples/staging/ops-defender-staging
 *.exe
 *.exe~
 *.dll
