@@ -1,0 +1,50 @@
+# Multi-Root Dockerfile for Development
+# This Dockerfile demonstrates building Ops Defender with extensions from multiple repositories
+# Use this in a multi-root workspace where you have:
+# - ops-defender/ (core repository)
+# - ops-defender-extensions/ (private extension repository)
+#
+# Build context should be the parent directory containing both repos:
+#   docker build -f ops-defender/examples/staging/Dockerfile.multiroot -t ops-defender-staging .
+
+# Build stage
+FROM golang:1.25-alpine AS builder
+
+WORKDIR /build
+
+# Copy core ops-defender repository
+COPY ops-defender/ ./ops-defender/
+
+# Copy extension repository (if separate)
+# Uncomment if using separate extension repo:
+# COPY ops-defender-extensions/ ./ops-defender-extensions/
+
+# Set working directory to ops-defender
+WORKDIR /build/ops-defender
+
+# Download dependencies
+RUN go mod download
+
+# Build the staging example
+# Note: For separate extension repos, you would modify go.mod with replace directives
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o ops-defender-staging ./examples/staging
+
+# Runtime stage
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates
+
+WORKDIR /app
+
+# Copy binary
+COPY --from=builder /build/ops-defender/ops-defender-staging .
+
+# Copy configuration
+COPY --from=builder /build/ops-defender/examples/staging/allowlist.json /etc/ops-defender/allowlist.json
+
+# Set default config path
+ENV ALLOWLIST_CONFIG=/etc/ops-defender/allowlist.json
+
+EXPOSE 8080
+
+CMD ["./ops-defender-staging"]
