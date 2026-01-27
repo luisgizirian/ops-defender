@@ -69,6 +69,8 @@ type Defender struct {
 	excessiveNestingBlocks   int64                          // Counter for blocks due to excessive URL-encoded nesting
 	suspiciousBlocks         int64                          // Counter for blocks due to suspicious patterns
 	repeatBlockedRequests    int64                          // Counter for requests from already-blocked IPs (cached blocks)
+	droppedAnalysis          int64                          // Counter for analysis requests dropped due to channel full
+	analysisWorkerRestarts   int64                          // Counter for analysis worker restarts after panic
 	maxTrackedIPs            int                            // Maximum number of IPs to track simultaneously
 	droppedIPs               int64                          // Counter for IPs dropped due to memory limits
 	evictionBatchPct         float64                        // Percentage of IPs to evict in bulk (default 0.10 = 10%)
@@ -80,6 +82,7 @@ type Defender struct {
 	errorLogger              storage.ErrorLogger            // File-based error logger for critical issues
 	preHandlers              []extensions.RequestPreHandler // Registered extension pre-handlers (invoked before request processing)
 	patternAnalyzers         []extensions.PatternAnalyzer   // Registered pattern analyzers (invoked during deferred analysis)
+	workerStopChan           chan struct{}                  // Channel to signal worker shutdown
 }
 
 func NewDefender(opts DefenderOptions) *Defender {
@@ -114,10 +117,13 @@ func NewDefender(opts DefenderOptions) *Defender {
 		analysisChan:       make(chan string, 1000),
 		maxTrackedIPs:      opts.MaxTrackedIPs,
 		droppedIPs:         0,
+		droppedAnalysis:    0,
+		analysisWorkerRestarts: 0,
 		evictionBatchPct:   opts.EvictionBatchPct,
 		evictionInProgress: false,
 		evictionThreshold:  evictionThreshold,
 		simulationMode:     opts.SimulationMode,
+		workerStopChan:     make(chan struct{}),
 	}
 
 	// Initialize path traversal patterns (checked on ALL requests including whitelisted)
@@ -196,8 +202,9 @@ func NewDefender(opts DefenderOptions) *Defender {
 	}
 
 	// Start background workers
-	go d.analysisWorker()
+	go d.analysisWorkerManager()
 	go d.cleanupExpired()
+	go d.healthMonitor()
 
 	return d
 }
@@ -450,12 +457,61 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 		select {
 		case d.analysisChan <- ip:
 		default:
-			// Channel full, will be analyzed in next cycle
+			// Channel full, increment dropped counter and log warning
+			d.mu.Lock()
+			d.droppedAnalysis++
+			droppedCount := d.droppedAnalysis
+			d.mu.Unlock()
+			
+			// Log warning every 100 dropped requests
+			if droppedCount%100 == 1 {
+				log.Printf("WARNING: Analysis channel full, dropped analysis for IP %s (total dropped: %d)", ip, droppedCount)
+			}
 		}
 	}
 
 	// Allow request to proceed (non-blocking)
 	w.WriteHeader(http.StatusOK)
+}
+
+// analysisWorkerManager manages the analysis worker with automatic restart on panic
+func (d *Defender) analysisWorkerManager() {
+	for {
+		select {
+		case <-d.workerStopChan:
+			log.Printf("Analysis worker manager stopping")
+			return
+		default:
+			d.runAnalysisWorkerWithRecovery()
+		}
+	}
+}
+
+// runAnalysisWorkerWithRecovery runs the analysis worker with panic recovery
+func (d *Defender) runAnalysisWorkerWithRecovery() {
+	defer func() {
+		if r := recover(); r != nil {
+			d.mu.Lock()
+			d.analysisWorkerRestarts++
+			restartCount := d.analysisWorkerRestarts
+			d.mu.Unlock()
+			
+			// Log critical error
+			log.Printf("CRITICAL: Analysis worker panicked and restarting (restart #%d): %v", restartCount, r)
+			
+			// Log to error logger if available
+			if d.errorLogger != nil {
+				d.errorLogger.LogCritical("ANALYSIS_WORKER_PANIC", 
+					fmt.Sprintf("Analysis worker crashed and restarted (count: %d)", restartCount), 
+					fmt.Errorf("%v", r))
+			}
+			
+			// Brief delay before restart to prevent tight loop on persistent errors
+			time.Sleep(1 * time.Second)
+		}
+	}()
+	
+	d.analysisWorker()
 }
 
 func (d *Defender) analysisWorker() {
@@ -978,6 +1034,52 @@ func (d *Defender) cleanupExpired() {
 	}
 }
 
+// healthMonitor periodically logs health status and monitors for issues
+func (d *Defender) healthMonitor() {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		d.mu.RLock()
+		droppedAnalysis := d.droppedAnalysis
+		analysisWorkerRestarts := d.analysisWorkerRestarts
+		activeIPs := len(d.ipTrackers)
+		maxTrackedIPs := d.maxTrackedIPs
+		channelLen := len(d.analysisChan)
+		channelCap := cap(d.analysisChan)
+		d.mu.RUnlock()
+
+		// Calculate channel usage percentage
+		channelUsage := float64(channelLen) / float64(channelCap) * 100
+
+		// Log health status
+		log.Printf("HEALTH: Analysis worker restarts=%d, dropped_analysis=%d, channel_usage=%.1f%% (%d/%d), tracked_ips=%d/%d",
+			analysisWorkerRestarts, droppedAnalysis, channelUsage, channelLen, channelCap, activeIPs, maxTrackedIPs)
+
+		// Warn on critical conditions
+		if analysisWorkerRestarts > 0 {
+			log.Printf("WARNING: Analysis worker has restarted %d times - investigate for recurring panics", analysisWorkerRestarts)
+			if d.errorLogger != nil {
+				d.errorLogger.LogCritical("ANALYSIS_WORKER_HEALTH",
+					fmt.Sprintf("Analysis worker has restarted %d times", analysisWorkerRestarts), nil)
+			}
+		}
+
+		if droppedAnalysis > 0 {
+			log.Printf("WARNING: %d analysis requests have been dropped - channel may be full or worker may be slow", droppedAnalysis)
+			if d.errorLogger != nil {
+				d.errorLogger.LogCritical("DROPPED_ANALYSIS",
+					fmt.Sprintf("%d analysis requests dropped", droppedAnalysis), nil)
+			}
+		}
+
+		if channelUsage > 80 {
+			log.Printf("WARNING: Analysis channel is %0.1f%% full (%d/%d) - worker may be falling behind", 
+				channelUsage, channelLen, channelCap)
+		}
+	}
+}
+
 // SetTelemetry sets the telemetry handler
 func (d *Defender) SetTelemetry(telemetry *AppInsightsTelemetry) {
 	d.mu.Lock()
@@ -1095,10 +1197,12 @@ type Stats struct {
 }
 
 type MemoryStats struct {
-	TrackedIPs    int     `json:"tracked_ips"`
-	MaxTrackedIPs int     `json:"max_tracked_ips"`
-	DroppedIPs    int64   `json:"dropped_ips"`
-	UsagePercent  float64 `json:"usage_percent"`
+	TrackedIPs             int     `json:"tracked_ips"`
+	MaxTrackedIPs          int     `json:"max_tracked_ips"`
+	DroppedIPs             int64   `json:"dropped_ips"`
+	DroppedAnalysis        int64   `json:"dropped_analysis"`        // Analysis requests dropped due to full channel
+	AnalysisWorkerRestarts int64   `json:"analysis_worker_restarts"` // Number of times analysis worker has restarted
+	UsagePercent           float64 `json:"usage_percent"`
 }
 
 type IPStats struct {
@@ -1115,6 +1219,8 @@ func (d *Defender) GetStats(w http.ResponseWriter, r *http.Request) {
 	blockedRequests := d.blockedRequests
 	maxTrackedIPs := d.maxTrackedIPs
 	droppedIPs := d.droppedIPs
+	droppedAnalysis := d.droppedAnalysis
+	analysisWorkerRestarts := d.analysisWorkerRestarts
 	d.mu.RUnlock()
 
 	ctx := context.Background()
@@ -1137,10 +1243,12 @@ func (d *Defender) GetStats(w http.ResponseWriter, r *http.Request) {
 		TotalRequests:   totalRequests,
 		BlockedRequests: blockedRequests,
 		MemoryUsage: MemoryStats{
-			TrackedIPs:    activeIPs,
-			MaxTrackedIPs: maxTrackedIPs,
-			DroppedIPs:    droppedIPs,
-			UsagePercent:  usagePercent,
+			TrackedIPs:             activeIPs,
+			MaxTrackedIPs:          maxTrackedIPs,
+			DroppedIPs:             droppedIPs,
+			DroppedAnalysis:        droppedAnalysis,
+			AnalysisWorkerRestarts: analysisWorkerRestarts,
+			UsagePercent:           usagePercent,
 		},
 	}
 
