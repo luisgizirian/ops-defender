@@ -30,6 +30,7 @@ func TestAnalysisWorkerPanicRecovery(t *testing.T) {
 		EvictionThresholdPct: 0.93,
 		SimulationMode:       false,
 	})
+	defer defender.Stop()
 
 	ip := "192.168.1.100"
 
@@ -111,24 +112,22 @@ func TestAnalysisWorkerPanicRecovery(t *testing.T) {
 
 // TestDroppedAnalysisCounter tests that dropped analysis requests are counted
 func TestDroppedAnalysisCounter(t *testing.T) {
-	store := storage.NewMemoryStorage(60 * time.Minute)
+	// Create a slow storage that will make the worker slow
+	slowStorage := &slowMockStorage{
+		MemoryStorage: storage.NewMemoryStorage(60 * time.Minute),
+		blockDelay:    100 * time.Millisecond, // Slow down blocking
+	}
+
 	defender := NewDefender(DefenderOptions{
 		AnalysisThreshold:    2,
 		BlockDuration:        60 * time.Minute,
-		Storage:              store,
+		Storage:              slowStorage, // Use slow storage from the start
 		MaxTrackedIPs:        10000,
 		EvictionBatchPct:     0.10,
 		EvictionThresholdPct: 0.93,
 		SimulationMode:       false,
 	})
-
-	// Create a mock storage that will block the analysis worker
-	// This simulates a slow worker that can't keep up
-	slowStorage := &slowMockStorage{
-		MemoryStorage: storage.NewMemoryStorage(60 * time.Minute),
-		blockDelay:    100 * time.Millisecond, // Slow down blocking
-	}
-	defender.storage = slowStorage
+	defer defender.Stop()
 
 	// Send many requests rapidly to different IPs to fill the analysis channel
 	// Each IP needs 2 requests to trigger analysis (threshold=2)

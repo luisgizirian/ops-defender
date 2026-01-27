@@ -1106,6 +1106,13 @@ func (d *Defender) SetErrorLogger(logger storage.ErrorLogger) {
 	}
 }
 
+// Stop gracefully shuts down the defender's background workers
+func (d *Defender) Stop() {
+	close(d.workerStopChan)
+	// Note: analysisChan is NOT closed to prevent panics on send
+	// Workers will exit via workerStopChan signal
+}
+
 // RegisterExtension registers a RequestPreHandler extension that will be invoked
 // before each request is processed by the core system.
 //
