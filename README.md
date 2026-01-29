@@ -1058,9 +1058,40 @@ curl http://localhost:8080/stats | jq '.memory_usage'
   "tracked_ips": 8543,
   "max_tracked_ips": 10000,
   "dropped_ips": 127,
+  "dropped_analysis": 0,
+  "analysis_worker_restarts": 0,
   "usage_percent": 85.43
 }
 ```
+
+**New Health Metrics (Added for Operational Reliability):**
+- `dropped_analysis`: Count of analysis requests dropped when worker channel is full
+  - **Normal**: 0 (worker keeping up with load)
+  - **Warning**: > 0 (worker may be slow or under heavy load)
+  - **Critical**: Large values indicate worker issues
+- `analysis_worker_restarts`: Count of times analysis worker recovered from panic
+  - **Normal**: 0 (no panics occurred)
+  - **Warning**: Any value > 0 indicates recurring issues requiring investigation
+  - **Action**: Check error logs for panic stack traces
+
+**Automatic Health Monitoring:**
+
+Ops Defender includes built-in health monitoring that logs status every 10 minutes:
+
+```
+HEALTH: Analysis worker restarts=0, dropped_analysis=0, channel_usage=2.3% (23/1000), tracked_ips=145/10000
+```
+
+**Warning Conditions:**
+- `analysis_worker_restarts > 0`: Worker has crashed and restarted (check logs)
+- `dropped_analysis > 0`: Analysis requests being dropped (worker overwhelmed)
+- `channel_usage > 80%`: Analysis channel nearing capacity (worker falling behind)
+
+**Automatic Recovery:**
+- Analysis worker automatically restarts on panic with 1-second delay
+- Panic details logged to console and error log file (if configured)
+- System continues operating during worker restart (fail-open behavior)
+- Health metrics track recovery events for monitoring
 
 **Production Tuning:**
 - **Small deployments** (< 1000 concurrent users): `MAX_TRACKED_IPS=5000`
@@ -1081,6 +1112,8 @@ Yes, without proper limits, an attacker could attempt a memory exhaustion attack
 3. **Automatic cleanup**: Inactive IPs removed after 1 hour
 4. **Request log limits**: Only last 100 requests kept per IP
 5. **Monitoring**: Memory usage visible in `/stats` endpoint
+6. **Panic recovery**: Analysis worker automatically restarts on crashes
+7. **Health monitoring**: Periodic logging of system health metrics
 
 **Best Practice:** Use Redis storage for production deployments to enable persistent blocking across restarts and distributed deployments, reducing memory pressure on individual instances.
 
@@ -1145,6 +1178,51 @@ curl -H "X-Real-IP: 192.168.1.200" \
 - Check that `ANALYSIS_THRESHOLD` has been reached (default: 5 requests)
 - Verify Nginx is passing correct headers (`X-Real-IP`, `X-Original-URI`)
 - Review logs: `docker-compose logs ops-defender`
+- **New**: Check health metrics: `curl http://localhost:8080/stats | jq '.memory_usage'`
+  - If `analysis_worker_restarts > 0`: Worker crashed and restarted (check error logs)
+  - If `dropped_analysis > 0`: Analysis queue is full (worker overwhelmed)
+
+### Website not rendering / All requests allowed after some time
+
+**Symptom:** After running for 0.5-2 days, all malicious requests are allowed through and no new IPs get blocked, even though Ops Defender appears to be running.
+
+**Root Cause:** Analysis worker goroutine died silently without recovery mechanism (fixed in v1.x).
+
+**Diagnosis:**
+```bash
+# Check health metrics
+curl http://localhost:8080/stats | jq '.memory_usage'
+
+# Look for these indicators:
+# - analysis_worker_restarts: > 0 (worker crashed)
+# - dropped_analysis: high number (queue filling up)
+```
+
+**Solution (v1.x and later):**
+- **Automatic recovery:** Analysis worker now restarts automatically on panic
+- **Health monitoring:** System logs health status every 10 minutes
+- **Metrics tracking:** `analysis_worker_restarts` and `dropped_analysis` counters added
+
+**If using older version (pre-v1.x):**
+- Upgrade to latest version with panic recovery
+- Monitor error logs: `/var/log/ops-defender/errors.log`
+- Set up alerting on `analysis_worker_restarts` metric
+
+**Prevention:**
+```bash
+# Enable persistent error logging
+ERROR_LOG_PATH=/var/log/ops-defender/errors.log ./ops-defender
+
+# Monitor health metrics
+watch -n 60 'curl -s http://localhost:8080/stats | jq ".memory_usage"'
+
+# Set up alerts (Prometheus example)
+alert: AnalysisWorkerRestarted
+expr: ops_defender_analysis_worker_restarts > 0
+for: 1m
+annotations:
+  summary: "Analysis worker has crashed and restarted"
+```
 
 ### Legitimate traffic being blocked
 - Review block events: `curl http://localhost:8080/report`
