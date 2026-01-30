@@ -15,8 +15,6 @@
 >   
 > Use this project for learning, experimentation, and as a foundation to build upon—not as a turnkey security solution.
 
-[ HERO ]
-
 An extensible defensive operations layer for teams running internet-exposed services
 
 Ops-Defender helps engineering and security teams detect, correlate, and respond
