@@ -1254,10 +1254,11 @@ annotations:
 
 ## Extension System
 
-Ops Defender provides **two extensibility points** that allow external code to customize behavior without modifying the core system:
+Ops Defender provides **three extensibility points** that allow external code to customize behavior without modifying the core system:
 
 1. **RequestPreHandler** - Intercept requests **before** processing (early bypass)
-2. **PatternAnalyzer** - Inject custom pattern detection **during** deferred analysis (NEW)
+2. **PatternAnalyzer** - Inject custom pattern detection **during** deferred analysis
+3. **RequestPostHandler** - Intercept requests **after** processing, before response (override decisions) ← NEW
 
 ### Extension Point 1: RequestPreHandler (Pre-Request Bypass)
 
@@ -1653,6 +1654,244 @@ IP marked as suspicious and blocked: 10.0.0.2
 **Complete Example:**
 
 See [examples/sql-injection-detector/](examples/sql-injection-detector/) for a full implementation with confidence scoring and multiple pattern types.
+
+### Extension Point 3: RequestPostHandler (Post-Request Override)
+
+**NEW:** Allows external code to intercept and override request decisions **after** all core processing completes but **before** the HTTP response is sent. This enables final decision overrides without modifying the core system.
+
+**When to Use PostHandler:**
+- Override blocking decisions for specific critical paths (e.g., `/health`, `/admin/emergency`)
+- Allow critical IPs even when blocked (emergency access)
+- Custom allow/block logic based on complete request processing context
+- Temporary overrides during incidents or maintenance
+- Integration with external decision systems (after seeing core verdict)
+
+**Extension Execution Flow:**
+
+1. Request arrives at `/check` endpoint
+2. Pre-handlers invoked (if any)
+3. Core processing executes (blocking checks, pattern analysis, request logging)
+4. **Post-handlers invoked** in registration order (AFTER all core logic, BEFORE HTTP response)
+5. If any post-handler returns `ShouldOverride=true`:
+   - Core system's decision is **replaced** with post-handler's decision
+   - `ShouldBlock=true` → Force block (HTTP 403)
+   - `ShouldBlock=false` → Force allow (HTTP 200)
+   - Override logged for audit trail
+6. If all post-handlers pass (or none registered):
+   - Core system's decision is used
+
+**Interface Definition:**
+
+```go
+import "github.com/ops/defender/pkg/extensions"
+
+type RequestPostHandler interface {
+    // PostHandleRequest inspects processing result and can override the decision
+    PostHandleRequest(ctx PostHandlerContext) (PostHandlerResult, error)
+    
+    // Name returns a unique identifier for this post-handler
+    Name() string
+}
+
+type PostHandlerContext struct {
+    Request                 RequestInfo // Original request info
+    WasBlocked              bool        // True if core system decided to block
+    BlockReason             string      // Reason for blocking (if WasBlocked)
+    WasBypassedByPreHandler bool        // True if bypassed by pre-handler
+}
+
+type PostHandlerResult struct {
+    ShouldOverride bool   // If true, override core decision
+    ShouldBlock    bool   // If override, whether to block (true) or allow (false)
+    Reason         string // Optional reason for logging
+}
+```
+
+**Example 1: Emergency Allowlist (Override Block to Allow):**
+
+```go
+package emergencyaccess
+
+import "github.com/ops/defender/pkg/extensions"
+
+type EmergencyAllowlist struct {
+    criticalIPs map[string]bool
+}
+
+func NewEmergencyAllowlist(ips []string) *EmergencyAllowlist {
+    allowed := make(map[string]bool)
+    for _, ip := range ips {
+        allowed[ip] = true
+    }
+    return &EmergencyAllowlist{criticalIPs: allowed}
+}
+
+func (e *EmergencyAllowlist) Name() string {
+    return "emergency-allowlist"
+}
+
+func (e *EmergencyAllowlist) PostHandleRequest(ctx extensions.PostHandlerContext) (extensions.PostHandlerResult, error) {
+    // If request was blocked, check if it's from a critical IP
+    if ctx.WasBlocked && e.criticalIPs[ctx.Request.IP] {
+        return extensions.PostHandlerResult{
+            ShouldOverride: true,
+            ShouldBlock:    false, // Override: allow instead of block
+            Reason:         "critical IP emergency override",
+        }, nil
+    }
+    
+    // Don't override - use core system's decision
+    return extensions.PostHandlerResult{ShouldOverride: false}, nil
+}
+```
+
+**Example 2: Health Check Override (Path-Based):**
+
+```go
+package healthcheck
+
+import "github.com/ops/defender/pkg/extensions"
+
+type HealthCheckOverride struct {
+    healthPaths map[string]bool
+}
+
+func NewHealthCheckOverride(paths []string) *HealthCheckOverride {
+    allowed := make(map[string]bool)
+    for _, path := range paths {
+        allowed[path] = true
+    }
+    return &HealthCheckOverride{healthPaths: allowed}
+}
+
+func (h *HealthCheckOverride) Name() string {
+    return "health-check-override"
+}
+
+func (h *HealthCheckOverride) PostHandleRequest(ctx extensions.PostHandlerContext) (extensions.PostHandlerResult, error) {
+    // Always allow health check endpoints, even if IP is blocked
+    if ctx.WasBlocked && h.healthPaths[ctx.Request.URI] {
+        return extensions.PostHandlerResult{
+            ShouldOverride: true,
+            ShouldBlock:    false,
+            Reason:         "health check endpoint override",
+        }, nil
+    }
+    
+    return extensions.PostHandlerResult{ShouldOverride: false}, nil
+}
+```
+
+**Example 3: Additional Security Layer (Override Allow to Block):**
+
+```go
+package extrasecurity
+
+import "github.com/ops/defender/pkg/extensions"
+
+type ExtraSecurityFilter struct {
+    suspiciousUserAgents map[string]bool
+}
+
+func NewExtraSecurityFilter(agents []string) *ExtraSecurityFilter {
+    suspicious := make(map[string]bool)
+    for _, agent := range agents {
+        suspicious[agent] = true
+    }
+    return &ExtraSecurityFilter{suspiciousUserAgents: suspicious}
+}
+
+func (f *ExtraSecurityFilter) Name() string {
+    return "extra-security-filter"
+}
+
+func (f *ExtraSecurityFilter) PostHandleRequest(ctx extensions.PostHandlerContext) (extensions.PostHandlerResult, error) {
+    // Block requests with suspicious user agents even if core allowed them
+    if !ctx.WasBlocked && f.suspiciousUserAgents[ctx.Request.UserAgent] {
+        return extensions.PostHandlerResult{
+            ShouldOverride: true,
+            ShouldBlock:    true, // Override: block instead of allow
+            Reason:         "suspicious user agent detected",
+        }, nil
+    }
+    
+    return extensions.PostHandlerResult{ShouldOverride: false}, nil
+}
+```
+
+**Registering Post-Handlers:**
+
+```go
+package main
+
+import (
+    "github.com/ops/defender/pkg/defender"
+    "emergencyaccess"
+    "healthcheck"
+)
+
+func main() {
+    // Create defender
+    d := defender.NewDefender(defender.DefenderOptions{...})
+    
+    // Register post-handlers
+    emergency := emergencyaccess.NewEmergencyAllowlist([]string{"10.0.0.1", "192.168.1.1"})
+    d.RegisterPostHandler(emergency)
+    
+    health := healthcheck.NewHealthCheckOverride([]string{"/health", "/readiness"})
+    d.RegisterPostHandler(health)
+    
+    // Start server...
+}
+```
+
+**Post-Handler Guidelines:**
+
+**Performance Considerations:**
+- Keep `PostHandleRequest()` **fast** - runs on critical response path
+- Avoid blocking I/O or heavy computation
+- Use in-memory lookups (maps, caches)
+- Pre-load data during initialization
+
+**Security Considerations:**
+- **Use sparingly** - overriding security decisions should be rare
+- **Be specific** - narrow IP/path matching, avoid wildcards
+- **Log all overrides** - audit trail is critical
+- **Review carefully** - post-handlers can reverse security decisions
+- **Consider rate limiting** - prevent override abuse
+
+**Error Handling:**
+- **Fail-open**: Errors are logged but don't block requests
+- **Isolation**: Handler errors don't affect other handlers or core logic
+- **Observability**: All overrides and errors logged with handler name
+
+**Testing Post-Handlers:**
+
+```bash
+# Pre-block an IP
+redis-cli SET "blocked:10.0.0.1" "test block"
+
+# Test override to allow (should return 200 if post-handler registered)
+curl -H "X-Real-IP: 10.0.0.1" \
+     -H "X-Original-URI: /health" \
+     http://localhost:8080/check
+
+# Expected: 200 OK (post-handler overrides block)
+
+# Check logs for override message
+# "Request decision overridden by post-handler 'health-check-override': 
+#  IP=10.0.0.1, URI=/health, ShouldBlock=false, Reason=health check endpoint override"
+```
+
+**Extension System Summary:**
+
+Ops Defender's three extension points provide complete request lifecycle coverage:
+
+1. **PreHandler** - Early bypass (before any processing)
+2. **PatternAnalyzer** - Custom detection (during deferred analysis)
+3. **PostHandler** - Final override (after processing, before response)
+
+This architecture enables complete customization without modifying core code.
 
 **Best Practices:**
 - Use **strict matching** (exact IP, not IP ranges if possible)
