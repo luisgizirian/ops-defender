@@ -15,7 +15,9 @@
 >   
 > Use this project for learning, experimentation, and as a foundation to build upon—not as a turnkey security solution.
 
-An extensible defensive operations layer for teams running internet-exposed services
+---
+
+## An extensible defensive operations layer for teams running internet-exposed services
 
 Ops-Defender helps engineering and security teams detect, correlate, and respond
 to hostile traffic patterns across public web applications and APIs — under their
