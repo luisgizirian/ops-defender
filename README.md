@@ -15,7 +15,19 @@
 >   
 > Use this project for learning, experimentation, and as a foundation to build upon—not as a turnkey security solution.
 
-High-performance HTTP-based request defense system that detects abuse-like suspicious patterns and blocks malicious IPs using deferred analysis.
+[ HERO ]
+
+An extensible defensive operations layer for teams running internet-exposed services
+
+Ops-Defender helps engineering and security teams detect, correlate, and respond
+to hostile traffic patterns across public web applications and APIs — under their
+own control.
+
+• Detect abusive and hostile traffic patterns beyond simple rate limiting
+• Correlate signals across services to surface real threats, not noise
+• Apply defensive actions and integrations without replacing existing security tools
+
+> High-performance HTTP-based request defense system that detects abuse-like suspicious patterns and blocks malicious IPs using deferred analysis.
 
 ## Overview
 
