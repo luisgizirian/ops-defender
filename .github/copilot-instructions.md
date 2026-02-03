@@ -128,6 +128,131 @@ func (f *CustomFilter) Name() string { return "custom-filter" }
 - Review extension code carefully before production deployment
 - Use strict matching, avoid broad bypass rules
 
+### PostHandler Extension System
+
+Ops Defender provides a **RequestPostHandler** extensibility point for intercepting requests after core processing but before the final HTTP response is sent:
+
+**Architecture:**
+- **Interface**: `pkg/extensions/extensions.go` - Defines `RequestPostHandler` interface
+- **Registration**: `Defender.RegisterPostHandler()` - Thread-safe registration method
+- **Invocation**: Last code executed in `CheckRequest()`, after all blocking checks but before HTTP response
+
+**Execution Flow:**
+```go
+// In CheckRequest():
+1. Extract IP/URI from request
+2. Invoke pre-handlers (if any)
+3. Execute core blocking logic (cache checks, pattern analysis)
+4. Log request for deferred analysis
+5. INVOKE POST-HANDLERS (extension point) ← NEW
+6. If extension returns ShouldOverride=true → use extension's block/allow decision
+7. Otherwise: Use core system's decision
+8. Write final HTTP response (200 or 403)
+```
+
+**Key Design Principles:**
+- **Complete request flow coverage** - Post-handlers see the full processing result
+- **Fail-open** - Extension errors don't block requests
+- **Override capability** - Can reverse core system's block/allow decision
+- **Ordered execution** - Handlers run in registration order, first override wins
+- **Context-aware** - Post-handlers receive full processing context
+
+**PostHandlerContext Fields:**
+- `Request` - Original request info (IP, URI, headers, method)
+- `WasBlocked` - True if core system decided to block
+- `BlockReason` - Reason for blocking (if WasBlocked is true)
+- `WasBypassedByPreHandler` - True if request was bypassed by a pre-handler
+
+**When to Use:**
+- Override blocking decisions for specific paths (e.g., health checks, admin endpoints)
+- Custom allow/block logic based on complete request processing result
+- Integration with external decision systems (after seeing core system's verdict)
+- Temporary emergency overrides (allow critical IPs even when blocked)
+
+**When NOT to Use:**
+- Early request filtering (use PreHandler instead)
+- Pattern detection during analysis (use PatternAnalyzer instead)
+- Metrics/logging only (use telemetry or events instead)
+
+**Implementation Guidelines:**
+- Keep `PostHandleRequest()` **fast** - runs on critical response path
+- Avoid blocking I/O or expensive computation
+- Use in-memory lookups (maps, caches)
+- Handle errors gracefully (fail-open behavior)
+- Thread-safe: method may be called concurrently
+- Be conservative with overrides - reversing core decisions should be rare
+
+**Example Extension:**
+```go
+type EmergencyAllowlist struct {
+    criticalIPs map[string]bool
+}
+
+func (e *EmergencyAllowlist) PostHandleRequest(ctx extensions.PostHandlerContext) (extensions.PostHandlerResult, error) {
+    // Allow critical IPs even if they were blocked
+    if ctx.WasBlocked && e.criticalIPs[ctx.Request.IP] {
+        return extensions.PostHandlerResult{
+            ShouldOverride: true,
+            ShouldBlock:    false, // Override to allow
+            Reason:         "critical IP allowlist",
+        }, nil
+    }
+    return extensions.PostHandlerResult{ShouldOverride: false}, nil
+}
+
+func (e *EmergencyAllowlist) Name() string { return "emergency-allowlist" }
+```
+
+**Another Example - Path-Based Override:**
+```go
+type HealthCheckOverride struct {
+    healthPaths map[string]bool
+}
+
+func (h *HealthCheckOverride) PostHandleRequest(ctx extensions.PostHandlerContext) (extensions.PostHandlerResult, error) {
+    // Always allow health check endpoints even if IP is blocked
+    if ctx.WasBlocked && h.healthPaths[ctx.Request.URI] {
+        return extensions.PostHandlerResult{
+            ShouldOverride: true,
+            ShouldBlock:    false,
+            Reason:         "health check endpoint override",
+        }, nil
+    }
+    return extensions.PostHandlerResult{ShouldOverride: false}, nil
+}
+
+func (h *HealthCheckOverride) Name() string { return "health-check-override" }
+```
+
+**Adding New PostHandlers:**
+1. Create extension package (separate repo or `pkg/extensions/<name>`)
+2. Implement `RequestPostHandler` interface
+3. Register in `main.go`: `defender.RegisterPostHandler(handler)`
+4. Unit test handler logic independently
+5. Integration test with Ops Defender
+
+**Observability:**
+- Registration: `Registered post-handler: <name> (total post-handlers: N)`
+- Errors: `PostHandler '<name>' returned error, continuing: <error>`
+- Override: `Request decision overridden by post-handler '<name>': IP=..., URI=..., ShouldBlock=..., Reason=...`
+
+**Security Notes:**
+- Post-handlers can reverse security decisions - use with extreme caution
+- Overrides should be narrow and well-justified (specific IPs/paths)
+- Log all overrides for security audit trails
+- Review post-handler code carefully before production deployment
+- Consider rate limiting override usage to prevent abuse
+
+**Extension System Summary:**
+
+Ops Defender provides **three extension points** covering the complete request lifecycle:
+
+1. **PreHandler** - Before core processing (bypass all checks)
+2. **PatternAnalyzer** - During deferred analysis (custom pattern detection)
+3. **PostHandler** - After core processing (override final decision)
+
+This three-tier system allows complete customization without modifying core code.
+
 ### Three-Tier Caching System
 
 Ops Defender uses layered caching to minimize latency and Redis calls:
@@ -468,11 +593,26 @@ examples/            - Monitoring configurations, dashboards, integration guides
 
 ### File-Specific Conventions
 
+**extensions.go** (`pkg/extensions/`):
+- Defines extension interfaces: `RequestPreHandler`, `RequestPostHandler`, `PatternAnalyzer`
+- Contains extension context/result types: `RequestInfo`, `PreHandlerResult`, `PostHandlerContext`, `PostHandlerResult`, `AnalysisContext`, `AnalysisResult`
+- Helper function `RequestInfoFromHTTP()` for creating RequestInfo from http.Request
+- **Do not add business logic here** - keep it pure interface definitions
+- **Public package** - can be imported by external modules to implement extensions
+- Extensions implementing these interfaces should be in separate packages/repos
+
 **defender.go:**
 - All blocking logic must go through storage interface (Redis/memory)
 - Pattern detection uses pre-compiled regex in `suspiciousPatterns`
 - New attack patterns: Add to `patterns` slice in `NewDefender()`
 - Block events must be recorded via `storage.RecordBlockEvent()` for reporting
+- **Extension invocation** happens at:
+  - Start of `CheckRequest()`: PreHandlers (before any core logic)
+  - End of `CheckRequest()`: PostHandlers (before HTTP response via `handleFinalResponse()`)
+  - During analysis worker: PatternAnalyzers (deferred analysis)
+- `RegisterExtension()` method for thread-safe PreHandler registration
+- `RegisterPostHandler()` method for thread-safe PostHandler registration
+- `RegisterPatternAnalyzer()` method for thread-safe analyzer registration
 
 **storage.go:**
 - Two implementations: `RedisStorage` (production) and `MemoryStorage` (dev/testing)

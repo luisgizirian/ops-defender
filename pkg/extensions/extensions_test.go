@@ -465,3 +465,290 @@ func TestMockPatternAnalyzer_PriorityOrdering(t *testing.T) {
 	}
 }
 
+// mockPostHandler is a test implementation of RequestPostHandler
+type mockPostHandler struct {
+	name           string
+	shouldOverride bool
+	shouldBlock    bool
+	reason         string
+	returnError    error
+}
+
+func (m *mockPostHandler) Name() string {
+	return m.name
+}
+
+func (m *mockPostHandler) PostHandleRequest(ctx PostHandlerContext) (PostHandlerResult, error) {
+	if m.returnError != nil {
+		return PostHandlerResult{}, m.returnError
+	}
+
+	return PostHandlerResult{
+		ShouldOverride: m.shouldOverride,
+		ShouldBlock:    m.shouldBlock,
+		Reason:         m.reason,
+	}, nil
+}
+
+func TestMockPostHandler_Name(t *testing.T) {
+	handler := &mockPostHandler{name: "test-post-handler"}
+
+	if handler.Name() != "test-post-handler" {
+		t.Errorf("Expected name 'test-post-handler', got %s", handler.Name())
+	}
+}
+
+func TestMockPostHandler_PostHandleRequest_Override(t *testing.T) {
+	handler := &mockPostHandler{
+		name:           "override-handler",
+		shouldOverride: true,
+		shouldBlock:    true,
+		reason:         "custom block reason",
+	}
+
+	ctx := PostHandlerContext{
+		Request: RequestInfo{
+			IP:     "10.0.0.1",
+			URI:    "/test",
+			Method: "GET",
+		},
+		WasBlocked:  false,
+		BlockReason: "",
+	}
+
+	result, err := handler.PostHandleRequest(ctx)
+
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+
+	if !result.ShouldOverride {
+		t.Error("Expected ShouldOverride to be true")
+	}
+
+	if !result.ShouldBlock {
+		t.Error("Expected ShouldBlock to be true")
+	}
+
+	if result.Reason != "custom block reason" {
+		t.Errorf("Expected reason 'custom block reason', got %s", result.Reason)
+	}
+}
+
+func TestMockPostHandler_PostHandleRequest_NoOverride(t *testing.T) {
+	handler := &mockPostHandler{
+		name:           "no-override-handler",
+		shouldOverride: false,
+	}
+
+	ctx := PostHandlerContext{
+		Request: RequestInfo{
+			IP:     "10.0.0.2",
+			URI:    "/test",
+			Method: "GET",
+		},
+		WasBlocked:  true,
+		BlockReason: "suspicious pattern",
+	}
+
+	result, err := handler.PostHandleRequest(ctx)
+
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+
+	if result.ShouldOverride {
+		t.Error("Expected ShouldOverride to be false")
+	}
+}
+
+func TestMockPostHandler_PostHandleRequest_Error(t *testing.T) {
+	testErr := errors.New("mock post-handler error")
+	handler := &mockPostHandler{
+		name:        "error-post-handler",
+		returnError: testErr,
+	}
+
+	ctx := PostHandlerContext{
+		Request: RequestInfo{
+			IP:     "10.0.0.3",
+			URI:    "/test",
+			Method: "GET",
+		},
+		WasBlocked: false,
+	}
+
+	result, err := handler.PostHandleRequest(ctx)
+
+	if err != testErr {
+		t.Errorf("Expected error %v, got %v", testErr, err)
+	}
+
+	// Result should be zero value when error returned
+	if result.ShouldOverride {
+		t.Error("Expected ShouldOverride to be false on error")
+	}
+}
+
+func TestPostHandlerContext(t *testing.T) {
+	ctx := PostHandlerContext{
+		Request: RequestInfo{
+			IP:        "192.168.1.1",
+			URI:       "/api/test",
+			UserAgent: "test-agent",
+			Method:    "POST",
+		},
+		WasBlocked:              true,
+		BlockReason:             "excessive nesting",
+		WasBypassedByPreHandler: false,
+	}
+
+	if ctx.Request.IP != "192.168.1.1" {
+		t.Errorf("Expected IP 192.168.1.1, got %s", ctx.Request.IP)
+	}
+
+	if ctx.Request.URI != "/api/test" {
+		t.Errorf("Expected URI /api/test, got %s", ctx.Request.URI)
+	}
+
+	if !ctx.WasBlocked {
+		t.Error("Expected WasBlocked to be true")
+	}
+
+	if ctx.BlockReason != "excessive nesting" {
+		t.Errorf("Expected BlockReason 'excessive nesting', got %s", ctx.BlockReason)
+	}
+
+	if ctx.WasBypassedByPreHandler {
+		t.Error("Expected WasBypassedByPreHandler to be false")
+	}
+}
+
+func TestPostHandlerResult(t *testing.T) {
+	result := PostHandlerResult{
+		ShouldOverride: true,
+		ShouldBlock:    false,
+		Reason:         "Allow override",
+	}
+
+	if !result.ShouldOverride {
+		t.Error("Expected ShouldOverride to be true")
+	}
+
+	if result.ShouldBlock {
+		t.Error("Expected ShouldBlock to be false")
+	}
+
+	if result.Reason != "Allow override" {
+		t.Errorf("Expected Reason 'Allow override', got %s", result.Reason)
+	}
+}
+
+// Example of a custom post-handler extension for testing
+type CustomResponseOverrideExtension struct {
+	allowedPaths map[string]bool
+}
+
+func NewCustomResponseOverrideExtension(paths []string) *CustomResponseOverrideExtension {
+	allowed := make(map[string]bool)
+	for _, path := range paths {
+		allowed[path] = true
+	}
+	return &CustomResponseOverrideExtension{allowedPaths: allowed}
+}
+
+func (e *CustomResponseOverrideExtension) Name() string {
+	return "custom-response-override"
+}
+
+func (e *CustomResponseOverrideExtension) PostHandleRequest(ctx PostHandlerContext) (PostHandlerResult, error) {
+	// Override: allow certain paths even if they were blocked
+	if ctx.WasBlocked && e.allowedPaths[ctx.Request.URI] {
+		return PostHandlerResult{
+			ShouldOverride: true,
+			ShouldBlock:    false,
+			Reason:         "Path on override allowlist",
+		}, nil
+	}
+
+	return PostHandlerResult{ShouldOverride: false}, nil
+}
+
+func TestCustomResponseOverrideExtension(t *testing.T) {
+	ext := NewCustomResponseOverrideExtension([]string{"/admin/login", "/api/health"})
+
+	tests := []struct {
+		name             string
+		uri              string
+		wasBlocked       bool
+		expectedOverride bool
+		expectedBlock    bool
+		expectedReason   string
+	}{
+		{
+			name:             "Allow blocked path on allowlist",
+			uri:              "/admin/login",
+			wasBlocked:       true,
+			expectedOverride: true,
+			expectedBlock:    false,
+			expectedReason:   "Path on override allowlist",
+		},
+		{
+			name:             "Allow another blocked path on allowlist",
+			uri:              "/api/health",
+			wasBlocked:       true,
+			expectedOverride: true,
+			expectedBlock:    false,
+			expectedReason:   "Path on override allowlist",
+		},
+		{
+			name:             "Don't override non-blocked path",
+			uri:              "/admin/login",
+			wasBlocked:       false,
+			expectedOverride: false,
+			expectedBlock:    false,
+			expectedReason:   "",
+		},
+		{
+			name:             "Don't override blocked path not on allowlist",
+			uri:              "/malicious/path",
+			wasBlocked:       true,
+			expectedOverride: false,
+			expectedBlock:    false,
+			expectedReason:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := PostHandlerContext{
+				Request: RequestInfo{
+					IP:     "10.0.0.1",
+					URI:    tt.uri,
+					Method: "GET",
+				},
+				WasBlocked:  tt.wasBlocked,
+				BlockReason: "test reason",
+			}
+
+			result, err := ext.PostHandleRequest(ctx)
+
+			if err != nil {
+				t.Errorf("Unexpected error: %v", err)
+			}
+
+			if result.ShouldOverride != tt.expectedOverride {
+				t.Errorf("Expected ShouldOverride=%v, got %v", tt.expectedOverride, result.ShouldOverride)
+			}
+
+			if result.ShouldBlock != tt.expectedBlock {
+				t.Errorf("Expected ShouldBlock=%v, got %v", tt.expectedBlock, result.ShouldBlock)
+			}
+
+			if result.Reason != tt.expectedReason {
+				t.Errorf("Expected reason '%s', got '%s'", tt.expectedReason, result.Reason)
+			}
+		})
+	}
+}
+

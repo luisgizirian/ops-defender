@@ -77,12 +77,13 @@ type Defender struct {
 	evictionInProgress       bool                           // Flag to prevent concurrent evictions
 	evictionThreshold        int                            // Preemptive eviction threshold (e.g., 90% of max)
 	simulationMode           bool                           // When true, log blocks but don't actually block requests
-	telemetry                *AppInsightsTelemetry          // Azure Application Insights telemetry
-	eventStream              *EventStream                   // Real-time event stream
-	errorLogger              storage.ErrorLogger            // File-based error logger for critical issues
-	preHandlers              []extensions.RequestPreHandler // Registered extension pre-handlers (invoked before request processing)
-	patternAnalyzers         []extensions.PatternAnalyzer   // Registered pattern analyzers (invoked during deferred analysis)
-	workerStopChan           chan struct{}                  // Channel to signal worker shutdown
+	telemetry                *AppInsightsTelemetry           // Azure Application Insights telemetry
+	eventStream              *EventStream                    // Real-time event stream
+	errorLogger              storage.ErrorLogger             // File-based error logger for critical issues
+	preHandlers              []extensions.RequestPreHandler  // Registered extension pre-handlers (invoked before request processing)
+	patternAnalyzers         []extensions.PatternAnalyzer    // Registered pattern analyzers (invoked during deferred analysis)
+	postHandlers             []extensions.RequestPostHandler // Registered extension post-handlers (invoked after request processing, before response)
+	workerStopChan           chan struct{}                   // Channel to signal worker shutdown
 }
 
 func NewDefender(opts DefenderOptions) *Defender {
@@ -220,6 +221,68 @@ func (d *Defender) handleBlockedRequest(w http.ResponseWriter, ip, uri, source s
 	}
 }
 
+// handleFinalResponse invokes post-handlers and writes the final HTTP response
+// This is the single point where all request processing completes and response is sent
+func (d *Defender) handleFinalResponse(w http.ResponseWriter, r *http.Request, ip, uri string, wasBlocked bool, blockReason string, wasBypassedByPreHandler bool) {
+	// EXTENSION POINT: Invoke post-handlers before final response
+	// Post-handlers can override the core system's decision
+	d.mu.RLock()
+	postHandlers := d.postHandlers // Copy slice to avoid holding lock during extension execution
+	d.mu.RUnlock()
+
+	// Default decision from core system
+	shouldBlock := wasBlocked
+
+	if len(postHandlers) > 0 {
+		requestInfo := extensions.RequestInfoFromHTTP(r, ip, uri)
+		postCtx := extensions.PostHandlerContext{
+			Request:                 requestInfo,
+			WasBlocked:              wasBlocked,
+			BlockReason:             blockReason,
+			WasBypassedByPreHandler: wasBypassedByPreHandler,
+		}
+
+		for _, handler := range postHandlers {
+			result, err := handler.PostHandleRequest(postCtx)
+			if err != nil {
+				// Log error but continue processing (fail-open for extensions)
+				log.Printf("PostHandler '%s' returned error, continuing: %v", handler.Name(), err)
+				continue
+			}
+
+			if result.ShouldOverride {
+				// Extension decided to override - use its decision
+				shouldBlock = result.ShouldBlock
+				reason := result.Reason
+				if reason == "" {
+					if shouldBlock {
+						reason = "post-handler override: block"
+					} else {
+						reason = "post-handler override: allow"
+					}
+				}
+				log.Printf("Request decision overridden by post-handler '%s': IP=%s, URI=%s, ShouldBlock=%v, Reason=%s",
+					handler.Name(), ip, uri, shouldBlock, reason)
+
+				// First post-handler that overrides wins
+				break
+			}
+		}
+	}
+
+	// Write final response based on decision
+	if shouldBlock {
+		if d.simulationMode {
+			log.Printf("[SIMULATION] Would block IP %s, but allowing request: %s", ip, uri)
+			w.WriteHeader(http.StatusOK)
+		} else {
+			w.WriteHeader(http.StatusForbidden)
+		}
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
 func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 	ctx := context.Background()
 	ip := d.extractIP(r)
@@ -255,8 +318,8 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 				log.Printf("Request bypassed by extension '%s': IP=%s, URI=%s, Reason=%s",
 					handler.Name(), ip, uri, reason)
 
-				// Return 200 (allow) without any tracking
-				w.WriteHeader(http.StatusOK)
+				// Use handleFinalResponse to allow post-handlers to see this bypass decision
+				d.handleFinalResponse(w, r, ip, uri, false, "", true)
 				return
 			}
 		}
@@ -282,7 +345,7 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 			log.Printf("DEBUG: IP %s already blocked (cache), blocking repeat request: %s", ip, uri)
 		}
 
-		d.handleBlockedRequest(w, ip, uri, "cache")
+		d.handleFinalResponse(w, r, ip, uri, true, "IP blocked (cache)", false)
 		return
 	}
 	d.mu.RUnlock()
@@ -305,7 +368,7 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 			d.mu.Unlock()
 
 			log.Printf("DEBUG: IP %s already blocked (immediate-nesting), blocking repeat request: %s", ip, uri)
-			d.handleBlockedRequest(w, ip, uri, "cache-nesting")
+			d.handleFinalResponse(w, r, ip, uri, true, "IP blocked (cache-nesting)", false)
 			return
 		}
 
@@ -347,8 +410,8 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 
-		d.handleBlockedRequest(w, ip, uri, "immediate-nesting")
 		log.Printf("BLOCKED (immediate): IP %s - excessive nesting on first request: %s", ip, uri)
+		d.handleFinalResponse(w, r, ip, uri, true, "Excessive URL-encoded nesting detected (immediate block)", false)
 		return
 	}
 
@@ -373,7 +436,7 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 			d.blockedRequests++
 			d.mu.Unlock()
 
-			d.handleBlockedRequest(w, ip, uri, "storage")
+			d.handleFinalResponse(w, r, ip, uri, true, "IP blocked (storage)", false)
 			return
 		}
 	}
@@ -471,7 +534,7 @@ func (d *Defender) CheckRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Allow request to proceed (non-blocking)
-	w.WriteHeader(http.StatusOK)
+	d.handleFinalResponse(w, r, ip, uri, false, "", false)
 }
 
 // analysisWorkerManager manages the analysis worker with automatic restart on panic
@@ -1191,6 +1254,41 @@ func (d *Defender) RegisterPatternAnalyzer(analyzer extensions.PatternAnalyzer) 
 
 	log.Printf("Registered pattern analyzer: %s (priority: %d, total analyzers: %d)",
 		name, analyzer.Priority(), len(d.patternAnalyzers))
+}
+
+// RegisterPostHandler registers a RequestPostHandler extension that will be invoked
+// after request processing is complete but before the HTTP response is sent.
+//
+// Post-handlers are invoked in registration order. The first post-handler that returns
+// ShouldOverride=true will determine the final response (block or allow).
+//
+// This method is thread-safe and can be called at any time during the defender's lifecycle.
+func (d *Defender) RegisterPostHandler(handler extensions.RequestPostHandler) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// Validate handler
+	if handler == nil {
+		log.Printf("WARNING: Attempted to register nil PostHandler, ignoring")
+		return
+	}
+
+	name := handler.Name()
+	if name == "" {
+		log.Printf("WARNING: PostHandler has empty name, ignoring registration")
+		return
+	}
+
+	// Check for duplicate registration
+	for _, existing := range d.postHandlers {
+		if existing.Name() == name {
+			log.Printf("WARNING: PostHandler '%s' already registered, ignoring duplicate", name)
+			return
+		}
+	}
+
+	d.postHandlers = append(d.postHandlers, handler)
+	log.Printf("Registered post-handler: %s (total post-handlers: %d)", name, len(d.postHandlers))
 }
 
 type Stats struct {

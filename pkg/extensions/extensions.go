@@ -62,6 +62,57 @@ func RequestInfoFromHTTP(r *http.Request, ip, uri string) RequestInfo {
 	}
 }
 
+// PostHandlerContext contains information about the request processing result
+// that can be inspected by post-handler extensions.
+type PostHandlerContext struct {
+	Request      RequestInfo // The original request information
+	WasBlocked   bool        // True if the request was blocked by core logic
+	BlockReason  string      // Reason for blocking (if WasBlocked is true)
+	WasBypassedByPreHandler bool // True if request was bypassed by a pre-handler
+}
+
+// PostHandlerResult contains the result of a post-handler execution
+type PostHandlerResult struct {
+	ShouldOverride bool   // If true, override the core system's decision
+	ShouldBlock    bool   // If ShouldOverride is true, whether to block (true) or allow (false)
+	Reason         string // Optional reason for overriding (for logging purposes)
+}
+
+// RequestPostHandler is the interface that extensions must implement to intercept
+// requests after they have been processed by the core system but before the final
+// response is sent.
+//
+// Extensions implementing this interface can inspect the processing result and
+// decide whether to override the core system's block/allow decision.
+//
+// This extensibility point completes the request flow coverage, allowing extensions
+// to make final decisions based on the complete request processing context.
+type RequestPostHandler interface {
+	// PostHandleRequest is called after the core system processes a request but before
+	// the HTTP response is sent.
+	//
+	// Parameters:
+	//   - ctx: Context containing request info and processing result
+	//
+	// Returns:
+	//   - PostHandlerResult: Contains override decision and optional reason
+	//   - error: Any error encountered during post-handling
+	//
+	// If ShouldOverride is true:
+	//   - ShouldBlock=true: Force block the request (HTTP 403)
+	//   - ShouldBlock=false: Force allow the request (HTTP 200)
+	//
+	// If ShouldOverride is false:
+	//   - The core system's decision is used
+	//
+	// Note: Post-handlers are invoked in registration order. The first post-handler
+	// that returns ShouldOverride=true will determine the final response.
+	PostHandleRequest(ctx PostHandlerContext) (PostHandlerResult, error)
+
+	// Name returns a unique identifier for this extension (used for logging and debugging)
+	Name() string
+}
+
 // RequestLog contains details of a single logged request for pattern analysis
 type RequestLog struct {
 	URI           string    // The requested URI

@@ -1764,3 +1764,305 @@ func BenchmarkDefender_CheckRequest_WithBypassExtension(b *testing.B) {
 	}
 }
 
+
+// Mock PostHandler for testing
+type mockPostHandler struct {
+name           string
+shouldOverride bool
+shouldBlock    bool
+reason         string
+returnError    error
+callCount      int
+mu             sync.Mutex
+}
+
+func (m *mockPostHandler) Name() string {
+return m.name
+}
+
+func (m *mockPostHandler) PostHandleRequest(ctx extensions.PostHandlerContext) (extensions.PostHandlerResult, error) {
+m.mu.Lock()
+m.callCount++
+m.mu.Unlock()
+
+if m.returnError != nil {
+return extensions.PostHandlerResult{}, m.returnError
+}
+
+return extensions.PostHandlerResult{
+ShouldOverride: m.shouldOverride,
+ShouldBlock:    m.shouldBlock,
+Reason:         m.reason,
+}, nil
+}
+
+func (m *mockPostHandler) GetCallCount() int {
+m.mu.Lock()
+defer m.mu.Unlock()
+return m.callCount
+}
+
+func TestDefender_RegisterPostHandler(t *testing.T) {
+store := storage.NewMemoryStorage(60 * time.Minute)
+defender := NewDefender(DefenderOptions{
+AnalysisThreshold:    5,
+BlockDuration:        60 * time.Minute,
+Storage:              store,
+MaxTrackedIPs:        10000,
+EvictionBatchPct:     0.10,
+EvictionThresholdPct: 0.93,
+SimulationMode:       false,
+})
+
+// Register a post-handler
+handler := &mockPostHandler{
+name:           "test-post-handler",
+shouldOverride: false,
+}
+defender.RegisterPostHandler(handler)
+
+// Verify registration
+defender.mu.RLock()
+count := len(defender.postHandlers)
+defender.mu.RUnlock()
+
+if count != 1 {
+t.Errorf("Expected 1 post-handler, got %d", count)
+}
+
+// Test duplicate registration (should be ignored)
+defender.RegisterPostHandler(handler)
+
+defender.mu.RLock()
+count = len(defender.postHandlers)
+defender.mu.RUnlock()
+
+if count != 1 {
+t.Errorf("Expected 1 post-handler after duplicate registration, got %d", count)
+}
+
+// Test nil handler registration (should be ignored)
+defender.RegisterPostHandler(nil)
+
+defender.mu.RLock()
+count = len(defender.postHandlers)
+defender.mu.RUnlock()
+
+if count != 1 {
+t.Errorf("Expected 1 post-handler after nil registration, got %d", count)
+}
+}
+
+func TestDefender_PostHandler_NoOverride(t *testing.T) {
+store := storage.NewMemoryStorage(60 * time.Minute)
+defender := NewDefender(DefenderOptions{
+AnalysisThreshold:    5,
+BlockDuration:        60 * time.Minute,
+Storage:              store,
+MaxTrackedIPs:        10000,
+EvictionBatchPct:     0.10,
+EvictionThresholdPct: 0.93,
+SimulationMode:       false,
+})
+
+// Register a post-handler that doesn't override
+handler := &mockPostHandler{
+name:           "no-override-handler",
+shouldOverride: false,
+}
+defender.RegisterPostHandler(handler)
+
+// Make a normal request
+req := httptest.NewRequest("GET", "/test", nil)
+req.Header.Set("X-Real-IP", "192.168.1.1")
+req.Header.Set("X-Original-URI", "/normal-path")
+
+w := httptest.NewRecorder()
+defender.CheckRequest(w, req)
+
+// Should allow (200) since no override
+if w.Code != http.StatusOK {
+t.Errorf("Expected status 200, got %d", w.Code)
+}
+
+// Verify handler was called
+if handler.GetCallCount() != 1 {
+t.Errorf("Expected handler to be called once, got %d", handler.GetCallCount())
+}
+}
+
+func TestDefender_PostHandler_OverrideToBlock(t *testing.T) {
+store := storage.NewMemoryStorage(60 * time.Minute)
+defender := NewDefender(DefenderOptions{
+AnalysisThreshold:    5,
+BlockDuration:        60 * time.Minute,
+Storage:              store,
+MaxTrackedIPs:        10000,
+EvictionBatchPct:     0.10,
+EvictionThresholdPct: 0.93,
+SimulationMode:       false,
+})
+
+// Register a post-handler that overrides to block
+handler := &mockPostHandler{
+name:           "override-to-block-handler",
+shouldOverride: true,
+shouldBlock:    true,
+reason:         "custom block reason",
+}
+defender.RegisterPostHandler(handler)
+
+// Make a normal request (would normally be allowed)
+req := httptest.NewRequest("GET", "/test", nil)
+req.Header.Set("X-Real-IP", "192.168.1.1")
+req.Header.Set("X-Original-URI", "/normal-path")
+
+w := httptest.NewRecorder()
+defender.CheckRequest(w, req)
+
+// Should block (403) due to post-handler override
+if w.Code != http.StatusForbidden {
+t.Errorf("Expected status 403, got %d", w.Code)
+}
+
+// Verify handler was called
+if handler.GetCallCount() != 1 {
+t.Errorf("Expected handler to be called once, got %d", handler.GetCallCount())
+}
+}
+
+func TestDefender_PostHandler_OverrideToAllow(t *testing.T) {
+store := storage.NewMemoryStorage(60 * time.Minute)
+defender := NewDefender(DefenderOptions{
+AnalysisThreshold:    3,
+BlockDuration:        60 * time.Minute,
+Storage:              store,
+MaxTrackedIPs:        10000,
+EvictionBatchPct:     0.10,
+EvictionThresholdPct: 0.93,
+SimulationMode:       false,
+})
+
+// Register a post-handler that overrides to allow
+handler := &mockPostHandler{
+name:           "override-to-allow-handler",
+shouldOverride: true,
+shouldBlock:    false,
+reason:         "custom allow reason",
+}
+defender.RegisterPostHandler(handler)
+
+// Pre-block an IP in storage
+ctx := context.Background()
+store.BlockIP(ctx, "192.168.1.100", "test block", 60*time.Minute)
+
+// Make a request from blocked IP (would normally be blocked)
+req := httptest.NewRequest("GET", "/test", nil)
+req.Header.Set("X-Real-IP", "192.168.1.100")
+req.Header.Set("X-Original-URI", "/normal-path")
+
+w := httptest.NewRecorder()
+defender.CheckRequest(w, req)
+
+// Should allow (200) due to post-handler override
+if w.Code != http.StatusOK {
+t.Errorf("Expected status 200, got %d", w.Code)
+}
+
+// Verify handler was called
+if handler.GetCallCount() != 1 {
+t.Errorf("Expected handler to be called once, got %d", handler.GetCallCount())
+}
+}
+
+func TestDefender_PostHandler_Error(t *testing.T) {
+store := storage.NewMemoryStorage(60 * time.Minute)
+defender := NewDefender(DefenderOptions{
+AnalysisThreshold:    5,
+BlockDuration:        60 * time.Minute,
+Storage:              store,
+MaxTrackedIPs:        10000,
+EvictionBatchPct:     0.10,
+EvictionThresholdPct: 0.93,
+SimulationMode:       false,
+})
+
+// Register a post-handler that returns an error
+handler := &mockPostHandler{
+name:        "error-handler",
+returnError: fmt.Errorf("test error"),
+}
+defender.RegisterPostHandler(handler)
+
+// Make a normal request
+req := httptest.NewRequest("GET", "/test", nil)
+req.Header.Set("X-Real-IP", "192.168.1.1")
+req.Header.Set("X-Original-URI", "/normal-path")
+
+w := httptest.NewRecorder()
+defender.CheckRequest(w, req)
+
+// Should still allow (fail-open behavior)
+if w.Code != http.StatusOK {
+t.Errorf("Expected status 200 (fail-open), got %d", w.Code)
+}
+
+// Verify handler was called
+if handler.GetCallCount() != 1 {
+t.Errorf("Expected handler to be called once, got %d", handler.GetCallCount())
+}
+}
+
+func TestDefender_PostHandler_FirstOverrideWins(t *testing.T) {
+store := storage.NewMemoryStorage(60 * time.Minute)
+defender := NewDefender(DefenderOptions{
+AnalysisThreshold:    5,
+BlockDuration:        60 * time.Minute,
+Storage:              store,
+MaxTrackedIPs:        10000,
+EvictionBatchPct:     0.10,
+EvictionThresholdPct: 0.93,
+SimulationMode:       false,
+})
+
+// Register first handler that overrides to block
+handler1 := &mockPostHandler{
+name:           "first-handler",
+shouldOverride: true,
+shouldBlock:    true,
+reason:         "first handler blocks",
+}
+defender.RegisterPostHandler(handler1)
+
+// Register second handler that would override to allow
+handler2 := &mockPostHandler{
+name:           "second-handler",
+shouldOverride: true,
+shouldBlock:    false,
+reason:         "second handler allows",
+}
+defender.RegisterPostHandler(handler2)
+
+// Make a normal request
+req := httptest.NewRequest("GET", "/test", nil)
+req.Header.Set("X-Real-IP", "192.168.1.1")
+req.Header.Set("X-Original-URI", "/normal-path")
+
+w := httptest.NewRecorder()
+defender.CheckRequest(w, req)
+
+// Should block (403) because first handler's override wins
+if w.Code != http.StatusForbidden {
+t.Errorf("Expected status 403 (first handler wins), got %d", w.Code)
+}
+
+// Verify first handler was called
+if handler1.GetCallCount() != 1 {
+t.Errorf("Expected first handler to be called once, got %d", handler1.GetCallCount())
+}
+
+// Verify second handler was NOT called (first override wins)
+if handler2.GetCallCount() != 0 {
+t.Errorf("Expected second handler to NOT be called, got %d calls", handler2.GetCallCount())
+}
+}
