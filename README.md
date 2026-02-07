@@ -66,7 +66,7 @@ Ops Defender runs as a **standalone HTTP service** designed to integrate with **
 
 **HTTP-Based Request Flow:**
 
-1. **Proxy forwards request** to Ops Defender `/check` endpoint (via HTTP) Note: Ops Defender avoids working with each request's body. We suggest to exclude it at forwarding time. Our [NGINX conf sample](nginx.con.example) shows how the write off gets implemented.
+1. **Proxy forwards request** to Ops Defender `/check` endpoint (via HTTP) Note: Ops Defender avoids working with each request's body. We suggest to exclude it at forwarding time. Our [NGINX conf sample](nginx.conf.example) shows how the write off gets implemented.
 2. **Immediate check** for unforgiving patterns (excessive nesting):
    - **First malicious request** → blocked immediately (HTTP 403)
    - Prevents backend from processing dangerous URLs
