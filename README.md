@@ -28,6 +28,9 @@ own control.
 - Apply defensive actions and integrations without replacing existing security tools
 
 > High-performance HTTP-based request defense system that detects abuse-like suspicious patterns and blocks malicious IPs using deferred analysis.
+>
+> <img width="2613" height="1374" alt="image" src="https://github.com/user-attachments/assets/6bbaad75-9085-435e-9a1e-ddae74f2383d" />
+
 
 ## Overview
 
