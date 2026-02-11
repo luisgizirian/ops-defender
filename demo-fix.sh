@@ -4,9 +4,12 @@
 echo "=== Demonstrating the fix for blocked IPs request count ==="
 echo ""
 
+# Create unique log file for this demo instance
+LOG_FILE=$(mktemp /tmp/ops-defender-demo.XXXXXX.log)
+
 # Start ops-defender in background
 echo "Starting ops-defender..."
-PORT=8080 ANALYSIS_THRESHOLD=3 ./ops-defender > /tmp/ops-defender.log 2>&1 &
+PORT=8080 ANALYSIS_THRESHOLD=3 ./ops-defender > "$LOG_FILE" 2>&1 &
 SERVER_PID=$!
 sleep 2
 
@@ -46,4 +49,5 @@ fi
 echo ""
 echo "Cleaning up..."
 kill $SERVER_PID 2>/dev/null
+rm -f "$LOG_FILE"
 echo "✓ Demo complete"

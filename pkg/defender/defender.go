@@ -1328,9 +1328,9 @@ func (d *Defender) GetStats(w http.ResponseWriter, r *http.Request) {
 	analysisWorkerRestarts := d.analysisWorkerRestarts
 	
 	// Capture request counts from ipTrackers while holding lock
-	trackersCopy := make(map[string]int) // ip -> request count
+	ipRequestCounts := make(map[string]int) // ip -> request count
 	for ip, tracker := range d.ipTrackers {
-		trackersCopy[ip] = len(tracker.RequestLogs)
+		ipRequestCounts[ip] = len(tracker.RequestLogs)
 	}
 	d.mu.RUnlock()
 
@@ -1367,7 +1367,7 @@ func (d *Defender) GetStats(w http.ResponseWriter, r *http.Request) {
 	for _, info := range blockedIPs {
 		requestCount := 0
 		// Check if this blocked IP still has tracker data in memory
-		if count, exists := trackersCopy[info.IP]; exists {
+		if count, exists := ipRequestCounts[info.IP]; exists {
 			requestCount = count
 		}
 		
