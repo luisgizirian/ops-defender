@@ -1326,6 +1326,12 @@ func (d *Defender) GetStats(w http.ResponseWriter, r *http.Request) {
 	droppedIPs := d.droppedIPs
 	droppedAnalysis := d.droppedAnalysis
 	analysisWorkerRestarts := d.analysisWorkerRestarts
+	
+	// Capture request counts from ipTrackers while holding lock
+	trackersCopy := make(map[string]int) // ip -> request count
+	for ip, tracker := range d.ipTrackers {
+		trackersCopy[ip] = len(tracker.RequestLogs)
+	}
 	d.mu.RUnlock()
 
 	ctx := context.Background()
@@ -1357,11 +1363,17 @@ func (d *Defender) GetStats(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	// Add blocked IPs from storage
+	// Add blocked IPs from storage with actual request counts from ipTrackers
 	for _, info := range blockedIPs {
+		requestCount := 0
+		// Check if this blocked IP still has tracker data in memory
+		if count, exists := trackersCopy[info.IP]; exists {
+			requestCount = count
+		}
+		
 		stats.TopIPs = append(stats.TopIPs, IPStats{
 			IP:        info.IP,
-			Requests:  0, // Not tracked in storage
+			Requests:  requestCount, // Now shows actual count if available in memory
 			Blocked:   true,
 			BlockedAt: info.BlockedAt.Format(time.RFC3339),
 		})

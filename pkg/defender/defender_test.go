@@ -2,6 +2,7 @@ package defender
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -2064,5 +2065,100 @@ t.Errorf("Expected first handler to be called once, got %d", handler1.GetCallCou
 // Verify second handler was NOT called (first override wins)
 if handler2.GetCallCount() != 0 {
 t.Errorf("Expected second handler to NOT be called, got %d calls", handler2.GetCallCount())
+}
+}
+
+func TestDefender_GetStats_BlockedIPsShowRequestCount(t *testing.T) {
+store := storage.NewMemoryStorage(60 * time.Minute)
+defender := NewDefender(DefenderOptions{
+AnalysisThreshold:    3,
+BlockDuration:        60 * time.Minute,
+Storage:              store,
+MaxTrackedIPs:        10000,
+EvictionBatchPct:     0.10,
+EvictionThresholdPct: 0.93,
+SimulationMode:       false,
+})
+
+ip := "192.168.1.200"
+suspiciousPath := "/wp-admin"
+
+// Send 3 requests to reach analysis threshold
+for i := 0; i < 3; i++ {
+req := httptest.NewRequest("GET", "/test", nil)
+req.Header.Set("X-Real-IP", ip)
+req.Header.Set("X-Original-URI", suspiciousPath)
+
+w := httptest.NewRecorder()
+defender.CheckRequest(w, req)
+
+// First requests are allowed (deferred analysis)
+if w.Code != http.StatusOK {
+t.Errorf("Request %d: Expected status 200, got %d", i+1, w.Code)
+}
+}
+
+// Wait for analysis worker to process and block the IP
+time.Sleep(100 * time.Millisecond)
+
+// Verify IP is blocked
+req := httptest.NewRequest("GET", "/test", nil)
+req.Header.Set("X-Real-IP", ip)
+req.Header.Set("X-Original-URI", "/any-path")
+
+w := httptest.NewRecorder()
+defender.CheckRequest(w, req)
+
+if w.Code != http.StatusForbidden {
+t.Fatalf("Expected IP to be blocked (403), got %d", w.Code)
+}
+
+// Now check the stats endpoint
+statsReq := httptest.NewRequest("GET", "/stats", nil)
+statsW := httptest.NewRecorder()
+defender.GetStats(statsW, statsReq)
+
+if statsW.Code != http.StatusOK {
+t.Fatalf("Expected stats endpoint to return 200, got %d", statsW.Code)
+}
+
+// Parse the response
+var stats Stats
+if err := json.NewDecoder(statsW.Body).Decode(&stats); err != nil {
+t.Fatalf("Failed to decode stats response: %v", err)
+}
+
+// Verify we have blocked IPs
+if len(stats.TopIPs) == 0 {
+t.Fatal("Expected at least one blocked IP in TopIPs")
+}
+
+// Find our blocked IP
+var foundIP *IPStats
+for _, ipStats := range stats.TopIPs {
+if ipStats.IP == ip {
+foundIP = &ipStats
+break
+}
+}
+
+if foundIP == nil {
+t.Fatalf("Expected to find IP %s in TopIPs", ip)
+}
+
+// Verify the request count is correct (should be 3, not 0)
+expectedRequests := 3
+if foundIP.Requests != expectedRequests {
+t.Errorf("Expected blocked IP to show %d requests, got %d", expectedRequests, foundIP.Requests)
+}
+
+// Verify it's marked as blocked
+if !foundIP.Blocked {
+t.Error("Expected IP to be marked as blocked")
+}
+
+// Verify BlockedAt timestamp is set
+if foundIP.BlockedAt == "" {
+t.Error("Expected BlockedAt timestamp to be set")
 }
 }
