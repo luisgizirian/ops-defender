@@ -180,11 +180,12 @@ func main() {
 
 ## Extension System Overview
 
-Ops Defender provides three extension points:
+Ops Defender provides four extension points:
 
 1. **PreHandler** - Before core processing (bypass all checks)
 2. **PatternAnalyzer** - During analysis (custom pattern detection)
 3. **PostHandler** - After processing (override final decision) ← This example
+4. **StatsDataProvider** - Expose custom data in all informational endpoints
 
 See main [README.md](../../README.md) for complete extension system documentation.
 
@@ -193,4 +194,5 @@ See main [README.md](../../README.md) for complete extension system documentatio
 - [Extension System Guide](../../README.md#extension-system)
 - [PreHandler Example](../external-extension/)
 - [PatternAnalyzer Example](../sql-injection-detector/)
+- [StatsDataProvider Example](../stats-provider-example/)
 - [Development Guide](../../.github/copilot-instructions.md)

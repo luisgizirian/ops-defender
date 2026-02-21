@@ -1,14 +1,24 @@
-# Ops Defender - Monitoring Examples
+# Ops Defender - Examples
 
-This directory contains configuration examples, dashboards, and integration guides for monitoring Ops Defender.
+This directory contains configuration examples, dashboards, integration guides, and how-to examples for Ops Defender's extension system.
 
 ## Quick Links
 
 - **[MONITORING.md](MONITORING.md)** - Complete monitoring guide with all integration options
 - **[AZURE-INSIGHTS.md](AZURE-INSIGHTS.md)** - Azure Application Insights integration guide
+- **[EXTENSION-EXAMPLE.md](EXTENSION-EXAMPLE.md)** - PreHandler extension guide
 - **[grafana-dashboard.json](grafana-dashboard.json)** - Grafana dashboard template
 - **[prometheus.yml](prometheus.yml)** - Prometheus scrape configuration
 - **[live-dashboard.html](live-dashboard.html)** - Real-time HTML dashboard using SSE
+
+## Extension Examples
+
+| Directory | Extension Point | What It Demonstrates |
+|-----------|----------------|----------------------|
+| [`external-extension/`](external-extension/) | PreHandler | IP allowlist — bypass defense for trusted IPs |
+| [`sql-injection-detector/`](sql-injection-detector/) | PatternAnalyzer | Custom SQL injection pattern detection |
+| [`posthandler-example/`](posthandler-example/) | PostHandler | Override block decisions (emergency access, health checks) |
+| [`stats-provider-example/`](stats-provider-example/) | StatsDataProvider | Expose custom metrics in `/stats`, `/report`, `/timeseries`, `/metrics`, `/events` |
 
 ## What's Available
 
