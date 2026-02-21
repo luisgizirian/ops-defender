@@ -2619,3 +2619,246 @@ t.Errorf("toFloat64(%v) = %v, want %v", tt.input, got, tt.expected)
 }
 }
 }
+
+// ─── Race-condition tests for StatsDataProvider ───────────────────────────────
+
+// concurrentStatsProvider is a thread-safe mock StatsDataProvider used in
+// concurrency tests. It deliberately uses its own mutex to simulate a real
+// provider that tracks internal state.
+type concurrentStatsProvider struct {
+name    string
+mu      sync.Mutex
+counter int64
+}
+
+func (p *concurrentStatsProvider) Name() string { return p.name }
+func (p *concurrentStatsProvider) GetStats() (map[string]interface{}, error) {
+p.mu.Lock()
+defer p.mu.Unlock()
+p.counter++
+return map[string]interface{}{"calls": p.counter}, nil
+}
+
+// TestDefender_StatsProvider_RaceCondition_ConcurrentRegisterAndCollect
+// exercises RegisterStatsProvider and collectExtensionStats from many goroutines
+// simultaneously. Run with `go test -race` to detect data races.
+func TestDefender_StatsProvider_RaceCondition_ConcurrentRegisterAndCollect(t *testing.T) {
+d := newTestDefender()
+
+const goroutines = 50
+
+var wg sync.WaitGroup
+// Half of the goroutines register providers; the other half collect stats.
+for i := 0; i < goroutines; i++ {
+wg.Add(1)
+go func(idx int) {
+defer wg.Done()
+if idx%2 == 0 {
+// Register a provider (duplicates are silently ignored, that's OK)
+name := fmt.Sprintf("provider-%d", idx%5) // 5 unique names
+d.RegisterStatsProvider(&concurrentStatsProvider{name: name})
+} else {
+// Collect stats while registrations may be happening
+_ = d.collectExtensionStats()
+}
+}(i)
+}
+wg.Wait()
+
+// Verify all 5 unique providers ended up registered exactly once
+d.mu.RLock()
+count := len(d.statsProviders)
+d.mu.RUnlock()
+if count > 5 {
+t.Errorf("Expected at most 5 providers (one per unique name), got %d", count)
+}
+}
+
+// TestDefender_StatsProvider_RaceCondition_ConcurrentGetStatsAndRegister
+// calls GetStats (HTTP handler) concurrently with RegisterStatsProvider.
+func TestDefender_StatsProvider_RaceCondition_ConcurrentGetStatsAndRegister(t *testing.T) {
+d := newTestDefender()
+
+var wg sync.WaitGroup
+for i := 0; i < 20; i++ {
+wg.Add(1)
+go func(idx int) {
+defer wg.Done()
+if idx%2 == 0 {
+req := httptest.NewRequest("GET", "/stats", nil)
+w := httptest.NewRecorder()
+d.GetStats(w, req)
+if w.Code != http.StatusOK {
+t.Errorf("GetStats returned %d", w.Code)
+}
+} else {
+d.RegisterStatsProvider(&concurrentStatsProvider{
+name: fmt.Sprintf("p%d", idx),
+})
+}
+}(i)
+}
+wg.Wait()
+}
+
+// TestDefender_StatsProvider_RaceCondition_ConcurrentMetricsAndRegister
+// calls MetricsHandler concurrently with RegisterStatsProvider.
+func TestDefender_StatsProvider_RaceCondition_ConcurrentMetricsAndRegister(t *testing.T) {
+d := newTestDefender()
+
+var wg sync.WaitGroup
+for i := 0; i < 20; i++ {
+wg.Add(1)
+go func(idx int) {
+defer wg.Done()
+if idx%2 == 0 {
+req := httptest.NewRequest("GET", "/metrics", nil)
+w := httptest.NewRecorder()
+d.MetricsHandler(w, req)
+} else {
+d.RegisterStatsProvider(&concurrentStatsProvider{
+name: fmt.Sprintf("mp%d", idx),
+})
+}
+}(i)
+}
+wg.Wait()
+}
+
+// TestDefender_StatsProvider_RaceCondition_HighConcurrency_CollectOnly stresses
+// collectExtensionStats with many concurrent readers after providers are pre-registered.
+func TestDefender_StatsProvider_RaceCondition_HighConcurrency_CollectOnly(t *testing.T) {
+d := newTestDefender()
+
+// Pre-register several providers before starting goroutines
+for i := 0; i < 5; i++ {
+d.RegisterStatsProvider(&concurrentStatsProvider{
+name: fmt.Sprintf("pre-provider-%d", i),
+})
+}
+
+var wg sync.WaitGroup
+for i := 0; i < 100; i++ {
+wg.Add(1)
+go func() {
+defer wg.Done()
+result := d.collectExtensionStats()
+if result == nil {
+t.Errorf("Expected non-nil result with pre-registered providers")
+}
+}()
+}
+wg.Wait()
+}
+
+// ─── Benchmarks for StatsDataProvider code paths ─────────────────────────────
+
+// BenchmarkCollectExtensionStats_NoProviders measures the fast-path cost when
+// no StatsDataProviders are registered (should be near zero).
+func BenchmarkCollectExtensionStats_NoProviders(b *testing.B) {
+d := newTestDefender()
+b.ResetTimer()
+for i := 0; i < b.N; i++ {
+_ = d.collectExtensionStats()
+}
+}
+
+// BenchmarkCollectExtensionStats_OneProvider measures cost with a single provider.
+func BenchmarkCollectExtensionStats_OneProvider(b *testing.B) {
+d := newTestDefender()
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name: "bench-provider",
+data: map[string]interface{}{"counter": int64(42)},
+})
+b.ResetTimer()
+for i := 0; i < b.N; i++ {
+_ = d.collectExtensionStats()
+}
+}
+
+// BenchmarkCollectExtensionStats_FiveProviders measures cost with five providers,
+// which is a realistic upper-bound for most deployments.
+func BenchmarkCollectExtensionStats_FiveProviders(b *testing.B) {
+d := newTestDefender()
+for i := 0; i < 5; i++ {
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name: fmt.Sprintf("provider-%d", i),
+data: map[string]interface{}{"metric_a": int64(i), "metric_b": float64(i) * 1.5},
+})
+}
+b.ResetTimer()
+for i := 0; i < b.N; i++ {
+_ = d.collectExtensionStats()
+}
+}
+
+// BenchmarkGetStats_NoProviders is the baseline: /stats with no extensions.
+func BenchmarkGetStats_NoProviders(b *testing.B) {
+d := newTestDefender()
+b.ResetTimer()
+for i := 0; i < b.N; i++ {
+req := httptest.NewRequest("GET", "/stats", nil)
+w := httptest.NewRecorder()
+d.GetStats(w, req)
+}
+}
+
+// BenchmarkGetStats_WithProviders measures the overhead of extension collection
+// layered on top of the /stats baseline.
+func BenchmarkGetStats_WithProviders(b *testing.B) {
+d := newTestDefender()
+for i := 0; i < 3; i++ {
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name: fmt.Sprintf("p%d", i),
+data: map[string]interface{}{"hits": int64(100 + i)},
+})
+}
+b.ResetTimer()
+for i := 0; i < b.N; i++ {
+req := httptest.NewRequest("GET", "/stats", nil)
+w := httptest.NewRecorder()
+d.GetStats(w, req)
+}
+}
+
+// BenchmarkMetricsHandler_NoProviders is the Prometheus metrics baseline.
+func BenchmarkMetricsHandler_NoProviders(b *testing.B) {
+d := newTestDefender()
+b.ResetTimer()
+for i := 0; i < b.N; i++ {
+req := httptest.NewRequest("GET", "/metrics", nil)
+w := httptest.NewRecorder()
+d.MetricsHandler(w, req)
+}
+}
+
+// BenchmarkMetricsHandler_WithProviders measures extension overhead on /metrics.
+func BenchmarkMetricsHandler_WithProviders(b *testing.B) {
+d := newTestDefender()
+for i := 0; i < 3; i++ {
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name: fmt.Sprintf("prov-%d", i),
+data: map[string]interface{}{"gauge_a": int64(i), "gauge_b": float64(i) * 2.0},
+})
+}
+b.ResetTimer()
+for i := 0; i < b.N; i++ {
+req := httptest.NewRequest("GET", "/metrics", nil)
+w := httptest.NewRecorder()
+d.MetricsHandler(w, req)
+}
+}
+
+// BenchmarkSanitizePrometheusName measures the name sanitization helper.
+func BenchmarkSanitizePrometheusName(b *testing.B) {
+inputs := []string{
+"my-extension-name",
+"sql injection detector",
+"already_valid_name",
+"Mixed-Case With Spaces",
+}
+b.ResetTimer()
+for i := 0; i < b.N; i++ {
+_ = sanitizePrometheusName(inputs[i%len(inputs)])
+}
+}
