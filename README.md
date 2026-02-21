@@ -1262,7 +1262,7 @@ Ops Defender provides **four extensibility points** that allow external code to 
 1. **RequestPreHandler** - Intercept requests **before** processing (early bypass)
 2. **PatternAnalyzer** - Inject custom pattern detection **during** deferred analysis
 3. **RequestPostHandler** - Intercept requests **after** processing, before response (override decisions)
-4. **StatsDataProvider** - Contribute custom data **to** `/stats` and `/events` responses
+4. **StatsDataProvider** - Contribute custom data **to all informational endpoints** (`/stats`, `/report`, `/timeseries`, `/metrics`, `/events`)
 
 ### Extension Point 1: RequestPreHandler (Pre-Request Bypass)
 
@@ -1894,23 +1894,37 @@ Ops Defender's four extension points provide complete request lifecycle and obse
 1. **PreHandler** - Early bypass (before any processing)
 2. **PatternAnalyzer** - Custom detection (during deferred analysis)
 3. **PostHandler** - Final override (after processing, before response)
-4. **StatsDataProvider** - Custom data in `/stats` and `/events` responses
+4. **StatsDataProvider** - Custom data in all informational endpoints (`/stats`, `/report`, `/timeseries`, `/metrics`, `/events`)
 
 This architecture enables complete customization without modifying core code.
 
 ### Extension Point 4: StatsDataProvider (Custom Queryable Data)
 
-Allows extensions to contribute custom data to the `/stats` and `/events` endpoints. Data is namespaced by provider name under an `"extensions"` key, so multiple providers cannot conflict with each other or with core fields.
+Allows extensions to contribute custom data to **all informational endpoints**. Register once — your data appears across `/stats`, `/report`, `/timeseries`, `/events` (SSE), and `/metrics` (Prometheus) without creating per-extension routes.
+
+Data is namespaced by provider name under an `"extensions"` key in JSON responses. In `/metrics`, numeric values are exposed as Prometheus gauges named `ops_defender_extension_<provider>_<key>`. Non-numeric values are skipped in the Prometheus output.
+
+**Covered endpoints:**
+
+| Endpoint | Format | How extension data appears |
+|----------|--------|---------------------------|
+| `/stats` | JSON | `"extensions": { "<name>": { ... } }` |
+| `/report` | JSON | `"extensions": { "<name>": { ... } }` |
+| `/timeseries` | JSON | `"extensions": { "<name>": { ... } }` |
+| `/events` | SSE JSON | `"extensions": { "<name>": { ... } }` in `stats_update` events |
+| `/metrics` | Prometheus text | `ops_defender_extension_<name>_<key> <numeric_value>` |
 
 **Use Cases:**
-- Expose extension-specific counters or state via the existing `/stats` endpoint
+- Expose extension-specific counters or state via existing endpoints
 - Include custom metrics in the real-time `/events` SSE stream
-- Provide per-extension diagnostics to operators without creating per-extension endpoints
+- Surface extension data in Prometheus/Grafana dashboards
+- Provide per-extension diagnostics in periodic reports
 
 **Interface:**
 ```go
 type StatsDataProvider interface {
-    // GetStats returns custom key-value data included in /stats and /events responses.
+    // GetStats returns custom key-value data included in all informational endpoint responses.
+    // Numeric values are also emitted as Prometheus gauges in /metrics.
     // Called on the response path - keep it fast (use cached/in-memory data).
     GetStats() (map[string]interface{}, error)
 
@@ -1938,6 +1952,20 @@ type StatsDataProvider interface {
 }
 ```
 
+**Prometheus `/metrics` output** (numeric values only):
+```text
+# HELP ops_defender_extension_sql_injection_detector_sql_attempts_detected Extension metric from sql-injection-detector
+# TYPE ops_defender_extension_sql_injection_detector_sql_attempts_detected gauge
+ops_defender_extension_sql_injection_detector_sql_attempts_detected 42
+
+# HELP ops_defender_extension_geo_blocker_blocked_by_geo Extension metric from geo-blocker
+# TYPE ops_defender_extension_geo_blocker_blocked_by_geo gauge
+ops_defender_extension_geo_blocker_blocked_by_geo 7
+```
+
+> Metric names are auto-sanitized: hyphens and spaces → underscores, lowercased.
+> String/boolean values are silently skipped in Prometheus output but still appear in JSON responses.
+
 **Example Implementation:**
 ```go
 type SQLInjectionStats struct {
@@ -1953,7 +1981,7 @@ func (s *SQLInjectionStats) GetStats() (map[string]interface{}, error) {
     defer s.mu.Unlock()
     return map[string]interface{}{
         "sql_attempts_detected": s.attempts,
-        "last_detected_ip":      s.lastIP,
+        "last_detected_ip":      s.lastIP, // appears in JSON; skipped in Prometheus
     }, nil
 }
 

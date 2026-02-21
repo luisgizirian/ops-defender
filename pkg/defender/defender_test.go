@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -2395,5 +2396,226 @@ t.Fatalf("Failed to decode stats: %v", err)
 
 if _, exists := raw["extensions"]; exists {
 t.Error("Expected 'extensions' field to be absent when no providers registered")
+}
+}
+
+func TestDefender_GetReport_IncludesExtensions(t *testing.T) {
+d := newTestDefender()
+
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name: "report-ext",
+data: map[string]interface{}{"report_metric": 7},
+})
+
+req := httptest.NewRequest("GET", "/report?period=1", nil)
+w := httptest.NewRecorder()
+d.GetReport(w, req)
+
+if w.Code != http.StatusOK {
+t.Fatalf("Expected 200, got %d", w.Code)
+}
+
+var report Report
+if err := json.NewDecoder(w.Body).Decode(&report); err != nil {
+t.Fatalf("Failed to decode report: %v", err)
+}
+
+if report.Extensions == nil {
+t.Fatal("Expected extensions field to be non-nil")
+}
+
+extData, ok := report.Extensions["report-ext"]
+if !ok {
+t.Fatal("Expected 'report-ext' key in extensions")
+}
+
+dataMap, ok := extData.(map[string]interface{})
+if !ok {
+t.Fatalf("Expected map, got %T", extData)
+}
+
+if dataMap["report_metric"] != float64(7) {
+t.Errorf("Expected report_metric=7, got %v", dataMap["report_metric"])
+}
+}
+
+func TestDefender_GetReport_NoExtensions_OmitsField(t *testing.T) {
+d := newTestDefender()
+
+req := httptest.NewRequest("GET", "/report?period=1", nil)
+w := httptest.NewRecorder()
+d.GetReport(w, req)
+
+if w.Code != http.StatusOK {
+t.Fatalf("Expected 200, got %d", w.Code)
+}
+
+var raw map[string]interface{}
+if err := json.NewDecoder(w.Body).Decode(&raw); err != nil {
+t.Fatalf("Failed to decode report: %v", err)
+}
+
+if _, exists := raw["extensions"]; exists {
+t.Error("Expected 'extensions' field to be absent when no providers registered")
+}
+}
+
+func TestDefender_MetricsHandler_IncludesExtensions(t *testing.T) {
+d := newTestDefender()
+
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name: "my-provider",
+data: map[string]interface{}{
+"hit_count":   int64(123),
+"string_skip": "ignored",
+},
+})
+
+req := httptest.NewRequest("GET", "/metrics", nil)
+w := httptest.NewRecorder()
+d.MetricsHandler(w, req)
+
+if w.Code != http.StatusOK {
+t.Fatalf("Expected 200, got %d", w.Code)
+}
+
+body := w.Body.String()
+
+// Numeric value should appear as a Prometheus gauge
+if !strings.Contains(body, "ops_defender_extension_my_provider_hit_count") {
+t.Errorf("Expected extension metric 'ops_defender_extension_my_provider_hit_count' in output, got:\n%s", body)
+}
+
+// String values must be skipped
+if strings.Contains(body, "string_skip") {
+t.Errorf("Expected string value to be skipped, but found 'string_skip' in output")
+}
+}
+
+func TestDefender_MetricsHandler_NoExtensions_NoExtraOutput(t *testing.T) {
+d := newTestDefender()
+
+req := httptest.NewRequest("GET", "/metrics", nil)
+w := httptest.NewRecorder()
+d.MetricsHandler(w, req)
+
+body := w.Body.String()
+
+if strings.Contains(body, "ops_defender_extension_") {
+t.Errorf("Expected no extension metrics with no providers, but found some in output:\n%s", body)
+}
+}
+
+func TestDefender_TimeSeriesHandler_IncludesExtensions(t *testing.T) {
+d := newTestDefender()
+
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name: "ts-ext",
+data: map[string]interface{}{"ts_counter": 55},
+})
+
+req := httptest.NewRequest("GET", "/timeseries?period=1&interval=1h", nil)
+w := httptest.NewRecorder()
+d.TimeSeriesHandler(w, req)
+
+if w.Code != http.StatusOK {
+t.Fatalf("Expected 200, got %d", w.Code)
+}
+
+var resp TimeSeriesResponse
+if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+t.Fatalf("Failed to decode timeseries response: %v", err)
+}
+
+if resp.Extensions == nil {
+t.Fatal("Expected extensions field to be non-nil")
+}
+
+extData, ok := resp.Extensions["ts-ext"]
+if !ok {
+t.Fatal("Expected 'ts-ext' key in extensions")
+}
+
+dataMap, ok := extData.(map[string]interface{})
+if !ok {
+t.Fatalf("Expected map, got %T", extData)
+}
+
+if dataMap["ts_counter"] != float64(55) {
+t.Errorf("Expected ts_counter=55, got %v", dataMap["ts_counter"])
+}
+}
+
+func TestDefender_TimeSeriesHandler_NoExtensions_OmitsField(t *testing.T) {
+d := newTestDefender()
+
+req := httptest.NewRequest("GET", "/timeseries?period=1&interval=1h", nil)
+w := httptest.NewRecorder()
+d.TimeSeriesHandler(w, req)
+
+if w.Code != http.StatusOK {
+t.Fatalf("Expected 200, got %d", w.Code)
+}
+
+var raw map[string]interface{}
+if err := json.NewDecoder(w.Body).Decode(&raw); err != nil {
+t.Fatalf("Failed to decode timeseries response: %v", err)
+}
+
+if _, exists := raw["extensions"]; exists {
+t.Error("Expected 'extensions' field to be absent when no providers registered")
+}
+}
+
+func TestSanitizePrometheusName(t *testing.T) {
+tests := []struct {
+input    string
+expected string
+}{
+{"my-provider", "my_provider"},
+{"My Provider", "my_provider"},
+{"hit.count", "hit_count"},
+{"sql-injection-detector", "sql_injection_detector"},
+{"already_valid", "already_valid"},
+{"has spaces", "has_spaces"},
+}
+
+for _, tt := range tests {
+t.Run(tt.input, func(t *testing.T) {
+got := sanitizePrometheusName(tt.input)
+if got != tt.expected {
+t.Errorf("sanitizePrometheusName(%q) = %q, want %q", tt.input, got, tt.expected)
+}
+})
+}
+}
+
+func TestToFloat64(t *testing.T) {
+tests := []struct {
+input    interface{}
+expected float64
+ok       bool
+}{
+{int(42), 42.0, true},
+{int32(10), 10.0, true},
+{int64(100), 100.0, true},
+{float32(3.14), float64(float32(3.14)), true},
+{float64(2.71), 2.71, true},
+{uint(5), 5.0, true},
+{uint32(7), 7.0, true},
+{uint64(9), 9.0, true},
+{"string", 0, false},
+{true, 0, false},
+{nil, 0, false},
+}
+
+for _, tt := range tests {
+got, ok := toFloat64(tt.input)
+if ok != tt.ok {
+t.Errorf("toFloat64(%v): ok=%v, want %v", tt.input, ok, tt.ok)
+}
+if ok && got != tt.expected {
+t.Errorf("toFloat64(%v) = %v, want %v", tt.input, got, tt.expected)
+}
 }
 }

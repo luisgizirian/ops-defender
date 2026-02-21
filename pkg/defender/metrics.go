@@ -7,7 +7,9 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/ops/defender/pkg/storage"
 )
@@ -96,6 +98,70 @@ func (d *Defender) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "# HELP ops_defender_block_rate_percent Percentage of requests blocked\n")
 	fmt.Fprintf(w, "# TYPE ops_defender_block_rate_percent gauge\n")
 	fmt.Fprintf(w, "ops_defender_block_rate_percent %.2f\n\n", blockRate)
+
+	// Emit numeric extension metrics in Prometheus gauge format.
+	// Each numeric value from each StatsDataProvider is exposed as:
+	//   ops_defender_extension_<provider>_<key> <value>
+	// Non-numeric values are silently skipped.
+	if extData := d.collectExtensionStats(); extData != nil {
+		for providerName, raw := range extData {
+			dataMap, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			sanitizedProvider := sanitizePrometheusName(providerName)
+			for key, val := range dataMap {
+				f, ok := toFloat64(val)
+				if !ok {
+					continue
+				}
+				sanitizedKey := sanitizePrometheusName(key)
+				metricName := fmt.Sprintf("ops_defender_extension_%s_%s", sanitizedProvider, sanitizedKey)
+				fmt.Fprintf(w, "# HELP %s Extension metric from %s\n", metricName, providerName)
+				fmt.Fprintf(w, "# TYPE %s gauge\n", metricName)
+				fmt.Fprintf(w, "%s %g\n\n", metricName, f)
+			}
+		}
+	}
+}
+
+// sanitizePrometheusName converts an arbitrary string to a valid Prometheus metric name
+// by replacing non-alphanumeric characters with underscores and lower-casing.
+func sanitizePrometheusName(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
+}
+
+// toFloat64 attempts to convert a value to float64 for Prometheus output.
+// Returns (value, true) for numeric types, (0, false) for everything else.
+func toFloat64(v interface{}) (float64, bool) {
+	switch n := v.(type) {
+	case int:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case float32:
+		return float64(n), true
+	case float64:
+		return n, true
+	case uint:
+		return float64(n), true
+	case uint32:
+		return float64(n), true
+	case uint64:
+		return float64(n), true
+	default:
+		return 0, false
+	}
 }
 
 // TimeSeriesPoint represents a single data point in time series
@@ -112,10 +178,11 @@ type TimeSeriesData struct {
 
 // TimeSeriesResponse contains multiple time series
 type TimeSeriesResponse struct {
-	StartTime   time.Time        `json:"start_time"`
-	EndTime     time.Time        `json:"end_time"`
-	Interval    string           `json:"interval"`
-	TimeSeries  []TimeSeriesData `json:"time_series"`
+	StartTime  time.Time              `json:"start_time"`
+	EndTime    time.Time              `json:"end_time"`
+	Interval   string                 `json:"interval"`
+	TimeSeries []TimeSeriesData       `json:"time_series"`
+	Extensions map[string]interface{} `json:"extensions,omitempty"`
 }
 
 // TimeSeriesHandler provides time-series data for dashboards
@@ -191,6 +258,7 @@ func (d *Defender) TimeSeriesHandler(w http.ResponseWriter, r *http.Request) {
 				},
 			},
 		},
+		Extensions: d.collectExtensionStats(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")

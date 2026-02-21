@@ -1450,14 +1450,15 @@ func (d *Defender) GetStats(w http.ResponseWriter, r *http.Request) {
 }
 
 type Report struct {
-	GeneratedAt      string               `json:"generated_at"`
-	Period           string               `json:"period"`
-	TotalRequests    int64                `json:"total_requests"`
-	BlockedRequests  int64                `json:"blocked_requests"`
-	UniqueIPs        int                  `json:"unique_ips"`
-	BlockedIPs       int                  `json:"blocked_ips_count"`
-	BlockEvents      []storage.BlockEvent `json:"block_events"`
-	TopSuspiciousIPs []IPStats            `json:"top_suspicious_ips"`
+	GeneratedAt      string                 `json:"generated_at"`
+	Period           string                 `json:"period"`
+	TotalRequests    int64                  `json:"total_requests"`
+	BlockedRequests  int64                  `json:"blocked_requests"`
+	UniqueIPs        int                    `json:"unique_ips"`
+	BlockedIPs       int                    `json:"blocked_ips_count"`
+	BlockEvents      []storage.BlockEvent   `json:"block_events"`
+	TopSuspiciousIPs []IPStats              `json:"top_suspicious_ips"`
+	Extensions       map[string]interface{} `json:"extensions,omitempty"`
 }
 
 func (d *Defender) GenerateReport(periodHours int) Report {
@@ -1519,6 +1520,9 @@ func (d *Defender) GenerateReport(periodHours int) Report {
 			report.TopSuspiciousIPs = ipStats
 		}
 	}
+
+	// Collect data from registered StatsDataProviders
+	report.Extensions = d.collectExtensionStats()
 
 	return report
 }
