@@ -1257,11 +1257,12 @@ annotations:
 
 ## Extension System
 
-Ops Defender provides **three extensibility points** that allow external code to customize behavior without modifying the core system:
+Ops Defender provides **four extensibility points** that allow external code to customize behavior without modifying the core system:
 
 1. **RequestPreHandler** - Intercept requests **before** processing (early bypass)
 2. **PatternAnalyzer** - Inject custom pattern detection **during** deferred analysis
-3. **RequestPostHandler** - Intercept requests **after** processing, before response (override decisions) ← NEW
+3. **RequestPostHandler** - Intercept requests **after** processing, before response (override decisions)
+4. **StatsDataProvider** - Contribute custom data **to** `/stats` and `/events` responses
 
 ### Extension Point 1: RequestPreHandler (Pre-Request Bypass)
 
@@ -1888,13 +1889,86 @@ curl -H "X-Real-IP: 10.0.0.1" \
 
 **Extension System Summary:**
 
-Ops Defender's three extension points provide complete request lifecycle coverage:
+Ops Defender's four extension points provide complete request lifecycle and observability coverage:
 
 1. **PreHandler** - Early bypass (before any processing)
 2. **PatternAnalyzer** - Custom detection (during deferred analysis)
 3. **PostHandler** - Final override (after processing, before response)
+4. **StatsDataProvider** - Custom data in `/stats` and `/events` responses
 
 This architecture enables complete customization without modifying core code.
+
+### Extension Point 4: StatsDataProvider (Custom Queryable Data)
+
+Allows extensions to contribute custom data to the `/stats` and `/events` endpoints. Data is namespaced by provider name under an `"extensions"` key, so multiple providers cannot conflict with each other or with core fields.
+
+**Use Cases:**
+- Expose extension-specific counters or state via the existing `/stats` endpoint
+- Include custom metrics in the real-time `/events` SSE stream
+- Provide per-extension diagnostics to operators without creating per-extension endpoints
+
+**Interface:**
+```go
+type StatsDataProvider interface {
+    // GetStats returns custom key-value data included in /stats and /events responses.
+    // Called on the response path - keep it fast (use cached/in-memory data).
+    GetStats() (map[string]interface{}, error)
+
+    // Name returns a unique identifier used as the namespace key in responses.
+    Name() string
+}
+```
+
+**Response Shape:**
+```json
+{
+  "total_ips": 10,
+  "blocked_ips": 2,
+  "active_ips": 8,
+  "extensions": {
+    "sql-injection-detector": {
+      "sql_attempts_detected": 42,
+      "last_detected_ip": "1.2.3.4"
+    },
+    "geo-blocker": {
+      "blocked_countries": ["CN", "RU"],
+      "blocked_by_geo": 7
+    }
+  }
+}
+```
+
+**Example Implementation:**
+```go
+type SQLInjectionStats struct {
+    mu       sync.Mutex
+    attempts int64
+    lastIP   string
+}
+
+func (s *SQLInjectionStats) Name() string { return "sql-injection-detector" }
+
+func (s *SQLInjectionStats) GetStats() (map[string]interface{}, error) {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    return map[string]interface{}{
+        "sql_attempts_detected": s.attempts,
+        "last_detected_ip":      s.lastIP,
+    }, nil
+}
+
+// Register in main.go:
+sqlStats := &SQLInjectionStats{}
+def.RegisterStatsProvider(sqlStats)
+```
+
+**Error Handling:**
+If `GetStats()` returns an error it is logged and that provider's data is omitted from the response. Other providers continue (fail-open).
+
+**Observability:**
+- Registration: `Registered stats provider: <name> (total stats providers: N)`
+- Errors: `StatsDataProvider '<name>' returned error, skipping: <error>`
+
 
 **Best Practices:**
 - Use **strict matching** (exact IP, not IP ranges if possible)

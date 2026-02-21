@@ -2162,3 +2162,238 @@ if foundIP.BlockedAt == "" {
 t.Error("Expected BlockedAt timestamp to be set")
 }
 }
+
+// --- StatsDataProvider tests ---
+
+// mockStatsDataProvider is a test implementation of extensions.StatsDataProvider
+type mockStatsDataProvider struct {
+name        string
+data        map[string]interface{}
+returnError error
+}
+
+func (m *mockStatsDataProvider) Name() string { return m.name }
+
+func (m *mockStatsDataProvider) GetStats() (map[string]interface{}, error) {
+if m.returnError != nil {
+return nil, m.returnError
+}
+return m.data, nil
+}
+
+func newTestDefender() *Defender {
+return NewDefender(DefenderOptions{
+AnalysisThreshold:    5,
+BlockDuration:        60 * time.Minute,
+Storage:              storage.NewMemoryStorage(60 * time.Minute),
+MaxTrackedIPs:        10000,
+EvictionBatchPct:     0.10,
+EvictionThresholdPct: 0.93,
+})
+}
+
+func TestDefender_RegisterStatsProvider(t *testing.T) {
+d := newTestDefender()
+
+provider := &mockStatsDataProvider{
+name: "test-provider",
+data: map[string]interface{}{"metric": 1},
+}
+
+d.RegisterStatsProvider(provider)
+
+d.mu.RLock()
+count := len(d.statsProviders)
+d.mu.RUnlock()
+
+if count != 1 {
+t.Errorf("Expected 1 stats provider, got %d", count)
+}
+}
+
+func TestDefender_RegisterStatsProvider_DuplicateRejected(t *testing.T) {
+d := newTestDefender()
+
+p1 := &mockStatsDataProvider{name: "dup-provider", data: map[string]interface{}{}}
+p2 := &mockStatsDataProvider{name: "dup-provider", data: map[string]interface{}{}}
+
+d.RegisterStatsProvider(p1)
+d.RegisterStatsProvider(p2) // should be rejected
+
+d.mu.RLock()
+count := len(d.statsProviders)
+d.mu.RUnlock()
+
+if count != 1 {
+t.Errorf("Expected 1 stats provider after duplicate, got %d", count)
+}
+}
+
+func TestDefender_RegisterStatsProvider_NilRejected(t *testing.T) {
+d := newTestDefender()
+// Should not panic
+d.RegisterStatsProvider(nil)
+
+d.mu.RLock()
+count := len(d.statsProviders)
+d.mu.RUnlock()
+
+if count != 0 {
+t.Errorf("Expected 0 stats providers after nil registration, got %d", count)
+}
+}
+
+func TestDefender_CollectExtensionStats_NoProviders(t *testing.T) {
+d := newTestDefender()
+
+result := d.collectExtensionStats()
+if result != nil {
+t.Errorf("Expected nil when no providers registered, got %v", result)
+}
+}
+
+func TestDefender_CollectExtensionStats_SingleProvider(t *testing.T) {
+d := newTestDefender()
+
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name: "ext1",
+data: map[string]interface{}{"counter": 42},
+})
+
+result := d.collectExtensionStats()
+
+if result == nil {
+t.Fatal("Expected non-nil result")
+}
+
+ext1Data, ok := result["ext1"]
+if !ok {
+t.Fatal("Expected 'ext1' key in result")
+}
+
+dataMap, ok := ext1Data.(map[string]interface{})
+if !ok {
+t.Fatalf("Expected map, got %T", ext1Data)
+}
+
+if dataMap["counter"] != 42 {
+t.Errorf("Expected counter=42, got %v", dataMap["counter"])
+}
+}
+
+func TestDefender_CollectExtensionStats_MultipleProviders(t *testing.T) {
+d := newTestDefender()
+
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name: "providerA",
+data: map[string]interface{}{"a_metric": 1},
+})
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name: "providerB",
+data: map[string]interface{}{"b_metric": 2},
+})
+
+result := d.collectExtensionStats()
+
+if result == nil {
+t.Fatal("Expected non-nil result")
+}
+
+if _, ok := result["providerA"]; !ok {
+t.Error("Expected 'providerA' key in result")
+}
+
+if _, ok := result["providerB"]; !ok {
+t.Error("Expected 'providerB' key in result")
+}
+}
+
+func TestDefender_CollectExtensionStats_ErrorSkipsProvider(t *testing.T) {
+d := newTestDefender()
+
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name:        "error-provider",
+returnError: fmt.Errorf("provider error"),
+})
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name: "good-provider",
+data: map[string]interface{}{"status": "ok"},
+})
+
+result := d.collectExtensionStats()
+
+if result == nil {
+t.Fatal("Expected non-nil result (good provider should contribute)")
+}
+
+if _, ok := result["error-provider"]; ok {
+t.Error("Expected error provider to be absent from result")
+}
+
+if _, ok := result["good-provider"]; !ok {
+t.Error("Expected good provider to be present in result")
+}
+}
+
+func TestDefender_GetStats_IncludesExtensions(t *testing.T) {
+d := newTestDefender()
+
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name: "my-ext",
+data: map[string]interface{}{"custom_value": 99},
+})
+
+req := httptest.NewRequest("GET", "/stats", nil)
+w := httptest.NewRecorder()
+d.GetStats(w, req)
+
+if w.Code != http.StatusOK {
+t.Fatalf("Expected 200, got %d", w.Code)
+}
+
+var stats Stats
+if err := json.NewDecoder(w.Body).Decode(&stats); err != nil {
+t.Fatalf("Failed to decode stats: %v", err)
+}
+
+if stats.Extensions == nil {
+t.Fatal("Expected extensions field to be non-nil")
+}
+
+extData, ok := stats.Extensions["my-ext"]
+if !ok {
+t.Fatal("Expected 'my-ext' key in extensions")
+}
+
+// JSON numbers decode as float64
+dataMap, ok := extData.(map[string]interface{})
+if !ok {
+t.Fatalf("Expected map, got %T", extData)
+}
+
+if dataMap["custom_value"] != float64(99) {
+t.Errorf("Expected custom_value=99, got %v", dataMap["custom_value"])
+}
+}
+
+func TestDefender_GetStats_NoExtensions_OmitsField(t *testing.T) {
+d := newTestDefender()
+
+req := httptest.NewRequest("GET", "/stats", nil)
+w := httptest.NewRecorder()
+d.GetStats(w, req)
+
+if w.Code != http.StatusOK {
+t.Fatalf("Expected 200, got %d", w.Code)
+}
+
+// Decode into a raw map to check if field is absent
+var raw map[string]interface{}
+if err := json.NewDecoder(w.Body).Decode(&raw); err != nil {
+t.Fatalf("Failed to decode stats: %v", err)
+}
+
+if _, exists := raw["extensions"]; exists {
+t.Error("Expected 'extensions' field to be absent when no providers registered")
+}
+}

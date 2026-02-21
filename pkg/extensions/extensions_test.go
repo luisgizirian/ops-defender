@@ -752,3 +752,98 @@ func TestCustomResponseOverrideExtension(t *testing.T) {
 	}
 }
 
+// mockStatsDataProvider is a test implementation of StatsDataProvider
+type mockStatsDataProvider struct {
+	name        string
+	data        map[string]interface{}
+	returnError error
+}
+
+func (m *mockStatsDataProvider) Name() string {
+	return m.name
+}
+
+func (m *mockStatsDataProvider) GetStats() (map[string]interface{}, error) {
+	if m.returnError != nil {
+		return nil, m.returnError
+	}
+	return m.data, nil
+}
+
+func TestMockStatsDataProvider_Name(t *testing.T) {
+	provider := &mockStatsDataProvider{name: "test-stats-provider"}
+	if provider.Name() != "test-stats-provider" {
+		t.Errorf("Expected name 'test-stats-provider', got %s", provider.Name())
+	}
+}
+
+func TestMockStatsDataProvider_GetStats(t *testing.T) {
+	provider := &mockStatsDataProvider{
+		name: "my-ext",
+		data: map[string]interface{}{
+			"custom_counter": 42,
+			"custom_label":   "hello",
+		},
+	}
+
+	data, err := provider.GetStats()
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+
+	if data["custom_counter"] != 42 {
+		t.Errorf("Expected custom_counter=42, got %v", data["custom_counter"])
+	}
+
+	if data["custom_label"] != "hello" {
+		t.Errorf("Expected custom_label='hello', got %v", data["custom_label"])
+	}
+}
+
+func TestMockStatsDataProvider_GetStats_Error(t *testing.T) {
+	testErr := errors.New("stats provider error")
+	provider := &mockStatsDataProvider{
+		name:        "error-provider",
+		returnError: testErr,
+	}
+
+	data, err := provider.GetStats()
+	if err != testErr {
+		t.Errorf("Expected error %v, got %v", testErr, err)
+	}
+
+	if data != nil {
+		t.Errorf("Expected nil data on error, got %v", data)
+	}
+}
+
+// Example of a real-world StatsDataProvider for testing
+type RequestCounterExtension struct {
+	count int64
+}
+
+func (e *RequestCounterExtension) Name() string { return "request-counter" }
+
+func (e *RequestCounterExtension) GetStats() (map[string]interface{}, error) {
+	return map[string]interface{}{
+		"processed_requests": e.count,
+	}, nil
+}
+
+func TestRequestCounterExtension(t *testing.T) {
+	ext := &RequestCounterExtension{count: 100}
+
+	data, err := ext.GetStats()
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+
+	if data["processed_requests"] != int64(100) {
+		t.Errorf("Expected processed_requests=100, got %v", data["processed_requests"])
+	}
+
+	if ext.Name() != "request-counter" {
+		t.Errorf("Expected name 'request-counter', got %s", ext.Name())
+	}
+}
+

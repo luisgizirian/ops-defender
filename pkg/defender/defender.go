@@ -83,6 +83,7 @@ type Defender struct {
 	preHandlers              []extensions.RequestPreHandler  // Registered extension pre-handlers (invoked before request processing)
 	patternAnalyzers         []extensions.PatternAnalyzer    // Registered pattern analyzers (invoked during deferred analysis)
 	postHandlers             []extensions.RequestPostHandler // Registered extension post-handlers (invoked after request processing, before response)
+	statsProviders           []extensions.StatsDataProvider  // Registered stats data providers (invoked during /stats and /events)
 	workerStopChan           chan struct{}                   // Channel to signal worker shutdown
 }
 
@@ -1291,14 +1292,76 @@ func (d *Defender) RegisterPostHandler(handler extensions.RequestPostHandler) {
 	log.Printf("Registered post-handler: %s (total post-handlers: %d)", name, len(d.postHandlers))
 }
 
+// RegisterStatsProvider registers a StatsDataProvider extension that will be invoked
+// when the /stats and /events endpoints generate their responses.
+//
+// Each provider's data is namespaced under "extensions.<Name()>" in the response
+// to prevent key collisions between providers and with core fields.
+//
+// This method is thread-safe and can be called at any time during the defender's lifecycle.
+func (d *Defender) RegisterStatsProvider(provider extensions.StatsDataProvider) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if provider == nil {
+		log.Printf("WARNING: Attempted to register nil StatsDataProvider, ignoring")
+		return
+	}
+
+	name := provider.Name()
+	if name == "" {
+		log.Printf("WARNING: StatsDataProvider has empty name, ignoring registration")
+		return
+	}
+
+	for _, existing := range d.statsProviders {
+		if existing.Name() == name {
+			log.Printf("WARNING: StatsDataProvider '%s' already registered, ignoring duplicate", name)
+			return
+		}
+	}
+
+	d.statsProviders = append(d.statsProviders, provider)
+	log.Printf("Registered stats provider: %s (total stats providers: %d)", name, len(d.statsProviders))
+}
+
+// collectExtensionStats calls all registered StatsDataProviders and returns
+// their data namespaced by provider name. Errors are logged but do not prevent
+// other providers from being collected (fail-open behaviour).
+func (d *Defender) collectExtensionStats() map[string]interface{} {
+	d.mu.RLock()
+	providers := make([]extensions.StatsDataProvider, len(d.statsProviders))
+	copy(providers, d.statsProviders)
+	d.mu.RUnlock()
+
+	if len(providers) == 0 {
+		return nil
+	}
+
+	result := make(map[string]interface{}, len(providers))
+	for _, p := range providers {
+		data, err := p.GetStats()
+		if err != nil {
+			log.Printf("StatsDataProvider '%s' returned error, skipping: %v", p.Name(), err)
+			continue
+		}
+		result[p.Name()] = data
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 type Stats struct {
-	TotalIPs        int         `json:"total_ips"`
-	BlockedIPs      int         `json:"blocked_ips"`
-	ActiveIPs       int         `json:"active_ips"`
-	TopIPs          []IPStats   `json:"top_ips"`
-	MemoryUsage     MemoryStats `json:"memory_usage"`
-	TotalRequests   int64       `json:"total_requests"`
-	BlockedRequests int64       `json:"blocked_requests"`
+	TotalIPs        int                    `json:"total_ips"`
+	BlockedIPs      int                    `json:"blocked_ips"`
+	ActiveIPs       int                    `json:"active_ips"`
+	TopIPs          []IPStats              `json:"top_ips"`
+	MemoryUsage     MemoryStats            `json:"memory_usage"`
+	TotalRequests   int64                  `json:"total_requests"`
+	BlockedRequests int64                  `json:"blocked_requests"`
+	Extensions      map[string]interface{} `json:"extensions,omitempty"`
 }
 
 type MemoryStats struct {
@@ -1378,6 +1441,9 @@ func (d *Defender) GetStats(w http.ResponseWriter, r *http.Request) {
 			BlockedAt: info.BlockedAt.Format(time.RFC3339),
 		})
 	}
+
+	// Collect data from registered StatsDataProviders
+	stats.Extensions = d.collectExtensionStats()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
