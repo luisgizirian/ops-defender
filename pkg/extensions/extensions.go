@@ -140,6 +140,48 @@ type AnalysisResult struct {
 	Confidence    float64 // Confidence score 0.0-1.0 (optional, for metrics/ML)
 }
 
+// StatsDataProvider is the interface that extensions must implement to contribute
+// custom data to informational endpoints such as /stats and /events.
+//
+// Extensions implementing this interface can return arbitrary key-value data that
+// will be included in endpoint responses under a namespaced "extensions" field,
+// keyed by the provider's Name(). This allows multiple extensions to expose
+// custom metrics without polluting the core response structure or requiring
+// per-extension endpoints.
+//
+// # Execution Context
+//
+// GetStats is called synchronously during /stats HTTP handler and during
+// each periodic /events broadcast. Keep implementations fast and avoid
+// blocking I/O. Use cached/in-memory data where possible.
+//
+// # Namespacing
+//
+// All provider data is nested under "extensions.<Name()>" in the response,
+// so different providers cannot conflict with each other or with core fields:
+//
+//	{
+//	  "total_ips": 10,
+//	  ...
+//	  "extensions": {
+//	    "my-extension": { "custom_counter": 42 }
+//	  }
+//	}
+//
+// # Error Handling
+//
+// If GetStats returns an error it is logged and that provider's data is
+// omitted from the response (fail-open behaviour). Other providers continue.
+type StatsDataProvider interface {
+	// GetStats returns a map of custom data to be included in stats/events responses.
+	// Keys and values are arbitrary and defined by the extension author.
+	// Called on the critical response path - keep it fast.
+	GetStats() (map[string]interface{}, error)
+
+	// Name returns a unique identifier for this provider (used as the namespace key)
+	Name() string
+}
+
 // PatternAnalyzer is the interface for custom pattern detection during deferred analysis.
 //
 // Extensions implementing this interface can analyze request patterns from an IP

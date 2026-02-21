@@ -98,16 +98,23 @@ func (es *EventStream) sendStatsUpdate() {
 		blockedIPCount = len(blockedIPs)
 	}
 
+	data := map[string]interface{}{
+		"active_ips":       activeIPs,
+		"blocked_ips":      blockedIPCount,
+		"total_requests":   totalRequests,
+		"blocked_requests": blockedRequests,
+		"dropped_ips":      droppedIPs,
+	}
+
+	// Collect data from registered StatsDataProviders
+	if extData := es.defender.collectExtensionStats(); extData != nil {
+		data["extensions"] = extData
+	}
+
 	event := &StreamEvent{
 		Type:      "stats_update",
 		Timestamp: time.Now(),
-		Data: map[string]interface{}{
-			"active_ips":       activeIPs,
-			"blocked_ips":      blockedIPCount,
-			"total_requests":   totalRequests,
-			"blocked_requests": blockedRequests,
-			"dropped_ips":      droppedIPs,
-		},
+		Data:      data,
 	}
 
 	es.broadcast(event)

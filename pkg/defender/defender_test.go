@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -2160,5 +2161,704 @@ t.Error("Expected IP to be marked as blocked")
 // Verify BlockedAt timestamp is set
 if foundIP.BlockedAt == "" {
 t.Error("Expected BlockedAt timestamp to be set")
+}
+}
+
+// --- StatsDataProvider tests ---
+
+// mockStatsDataProvider is a test implementation of extensions.StatsDataProvider
+type mockStatsDataProvider struct {
+name        string
+data        map[string]interface{}
+returnError error
+}
+
+func (m *mockStatsDataProvider) Name() string { return m.name }
+
+func (m *mockStatsDataProvider) GetStats() (map[string]interface{}, error) {
+if m.returnError != nil {
+return nil, m.returnError
+}
+return m.data, nil
+}
+
+func newTestDefender() *Defender {
+return NewDefender(DefenderOptions{
+AnalysisThreshold:    5,
+BlockDuration:        60 * time.Minute,
+Storage:              storage.NewMemoryStorage(60 * time.Minute),
+MaxTrackedIPs:        10000,
+EvictionBatchPct:     0.10,
+EvictionThresholdPct: 0.93,
+})
+}
+
+func TestDefender_RegisterStatsProvider(t *testing.T) {
+d := newTestDefender()
+
+provider := &mockStatsDataProvider{
+name: "test-provider",
+data: map[string]interface{}{"metric": 1},
+}
+
+d.RegisterStatsProvider(provider)
+
+d.mu.RLock()
+count := len(d.statsProviders)
+d.mu.RUnlock()
+
+if count != 1 {
+t.Errorf("Expected 1 stats provider, got %d", count)
+}
+}
+
+func TestDefender_RegisterStatsProvider_DuplicateRejected(t *testing.T) {
+d := newTestDefender()
+
+p1 := &mockStatsDataProvider{name: "dup-provider", data: map[string]interface{}{}}
+p2 := &mockStatsDataProvider{name: "dup-provider", data: map[string]interface{}{}}
+
+d.RegisterStatsProvider(p1)
+d.RegisterStatsProvider(p2) // should be rejected
+
+d.mu.RLock()
+count := len(d.statsProviders)
+d.mu.RUnlock()
+
+if count != 1 {
+t.Errorf("Expected 1 stats provider after duplicate, got %d", count)
+}
+}
+
+func TestDefender_RegisterStatsProvider_NilRejected(t *testing.T) {
+d := newTestDefender()
+// Should not panic
+d.RegisterStatsProvider(nil)
+
+d.mu.RLock()
+count := len(d.statsProviders)
+d.mu.RUnlock()
+
+if count != 0 {
+t.Errorf("Expected 0 stats providers after nil registration, got %d", count)
+}
+}
+
+func TestDefender_CollectExtensionStats_NoProviders(t *testing.T) {
+d := newTestDefender()
+
+result := d.collectExtensionStats()
+if result != nil {
+t.Errorf("Expected nil when no providers registered, got %v", result)
+}
+}
+
+func TestDefender_CollectExtensionStats_SingleProvider(t *testing.T) {
+d := newTestDefender()
+
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name: "ext1",
+data: map[string]interface{}{"counter": 42},
+})
+
+result := d.collectExtensionStats()
+
+if result == nil {
+t.Fatal("Expected non-nil result")
+}
+
+ext1Data, ok := result["ext1"]
+if !ok {
+t.Fatal("Expected 'ext1' key in result")
+}
+
+dataMap, ok := ext1Data.(map[string]interface{})
+if !ok {
+t.Fatalf("Expected map, got %T", ext1Data)
+}
+
+if dataMap["counter"] != 42 {
+t.Errorf("Expected counter=42, got %v", dataMap["counter"])
+}
+}
+
+func TestDefender_CollectExtensionStats_MultipleProviders(t *testing.T) {
+d := newTestDefender()
+
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name: "providerA",
+data: map[string]interface{}{"a_metric": 1},
+})
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name: "providerB",
+data: map[string]interface{}{"b_metric": 2},
+})
+
+result := d.collectExtensionStats()
+
+if result == nil {
+t.Fatal("Expected non-nil result")
+}
+
+if _, ok := result["providerA"]; !ok {
+t.Error("Expected 'providerA' key in result")
+}
+
+if _, ok := result["providerB"]; !ok {
+t.Error("Expected 'providerB' key in result")
+}
+}
+
+func TestDefender_CollectExtensionStats_ErrorSkipsProvider(t *testing.T) {
+d := newTestDefender()
+
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name:        "error-provider",
+returnError: fmt.Errorf("provider error"),
+})
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name: "good-provider",
+data: map[string]interface{}{"status": "ok"},
+})
+
+result := d.collectExtensionStats()
+
+if result == nil {
+t.Fatal("Expected non-nil result (good provider should contribute)")
+}
+
+if _, ok := result["error-provider"]; ok {
+t.Error("Expected error provider to be absent from result")
+}
+
+if _, ok := result["good-provider"]; !ok {
+t.Error("Expected good provider to be present in result")
+}
+}
+
+func TestDefender_GetStats_IncludesExtensions(t *testing.T) {
+d := newTestDefender()
+
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name: "my-ext",
+data: map[string]interface{}{"custom_value": 99},
+})
+
+req := httptest.NewRequest("GET", "/stats", nil)
+w := httptest.NewRecorder()
+d.GetStats(w, req)
+
+if w.Code != http.StatusOK {
+t.Fatalf("Expected 200, got %d", w.Code)
+}
+
+var stats Stats
+if err := json.NewDecoder(w.Body).Decode(&stats); err != nil {
+t.Fatalf("Failed to decode stats: %v", err)
+}
+
+if stats.Extensions == nil {
+t.Fatal("Expected extensions field to be non-nil")
+}
+
+extData, ok := stats.Extensions["my-ext"]
+if !ok {
+t.Fatal("Expected 'my-ext' key in extensions")
+}
+
+// JSON numbers decode as float64
+dataMap, ok := extData.(map[string]interface{})
+if !ok {
+t.Fatalf("Expected map, got %T", extData)
+}
+
+if dataMap["custom_value"] != float64(99) {
+t.Errorf("Expected custom_value=99, got %v", dataMap["custom_value"])
+}
+}
+
+func TestDefender_GetStats_NoExtensions_OmitsField(t *testing.T) {
+d := newTestDefender()
+
+req := httptest.NewRequest("GET", "/stats", nil)
+w := httptest.NewRecorder()
+d.GetStats(w, req)
+
+if w.Code != http.StatusOK {
+t.Fatalf("Expected 200, got %d", w.Code)
+}
+
+// Decode into a raw map to check if field is absent
+var raw map[string]interface{}
+if err := json.NewDecoder(w.Body).Decode(&raw); err != nil {
+t.Fatalf("Failed to decode stats: %v", err)
+}
+
+if _, exists := raw["extensions"]; exists {
+t.Error("Expected 'extensions' field to be absent when no providers registered")
+}
+}
+
+func TestDefender_GetReport_IncludesExtensions(t *testing.T) {
+d := newTestDefender()
+
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name: "report-ext",
+data: map[string]interface{}{"report_metric": 7},
+})
+
+req := httptest.NewRequest("GET", "/report?period=1", nil)
+w := httptest.NewRecorder()
+d.GetReport(w, req)
+
+if w.Code != http.StatusOK {
+t.Fatalf("Expected 200, got %d", w.Code)
+}
+
+var report Report
+if err := json.NewDecoder(w.Body).Decode(&report); err != nil {
+t.Fatalf("Failed to decode report: %v", err)
+}
+
+if report.Extensions == nil {
+t.Fatal("Expected extensions field to be non-nil")
+}
+
+extData, ok := report.Extensions["report-ext"]
+if !ok {
+t.Fatal("Expected 'report-ext' key in extensions")
+}
+
+dataMap, ok := extData.(map[string]interface{})
+if !ok {
+t.Fatalf("Expected map, got %T", extData)
+}
+
+if dataMap["report_metric"] != float64(7) {
+t.Errorf("Expected report_metric=7, got %v", dataMap["report_metric"])
+}
+}
+
+func TestDefender_GetReport_NoExtensions_OmitsField(t *testing.T) {
+d := newTestDefender()
+
+req := httptest.NewRequest("GET", "/report?period=1", nil)
+w := httptest.NewRecorder()
+d.GetReport(w, req)
+
+if w.Code != http.StatusOK {
+t.Fatalf("Expected 200, got %d", w.Code)
+}
+
+var raw map[string]interface{}
+if err := json.NewDecoder(w.Body).Decode(&raw); err != nil {
+t.Fatalf("Failed to decode report: %v", err)
+}
+
+if _, exists := raw["extensions"]; exists {
+t.Error("Expected 'extensions' field to be absent when no providers registered")
+}
+}
+
+func TestDefender_MetricsHandler_IncludesExtensions(t *testing.T) {
+d := newTestDefender()
+
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name: "my-provider",
+data: map[string]interface{}{
+"hit_count":   int64(123),
+"string_skip": "ignored",
+},
+})
+
+req := httptest.NewRequest("GET", "/metrics", nil)
+w := httptest.NewRecorder()
+d.MetricsHandler(w, req)
+
+if w.Code != http.StatusOK {
+t.Fatalf("Expected 200, got %d", w.Code)
+}
+
+body := w.Body.String()
+
+// Numeric value should appear as a Prometheus gauge
+if !strings.Contains(body, "ops_defender_extension_my_provider_hit_count") {
+t.Errorf("Expected extension metric 'ops_defender_extension_my_provider_hit_count' in output, got:\n%s", body)
+}
+
+// String values must be skipped
+if strings.Contains(body, "string_skip") {
+t.Errorf("Expected string value to be skipped, but found 'string_skip' in output")
+}
+}
+
+func TestDefender_MetricsHandler_NoExtensions_NoExtraOutput(t *testing.T) {
+d := newTestDefender()
+
+req := httptest.NewRequest("GET", "/metrics", nil)
+w := httptest.NewRecorder()
+d.MetricsHandler(w, req)
+
+body := w.Body.String()
+
+if strings.Contains(body, "ops_defender_extension_") {
+t.Errorf("Expected no extension metrics with no providers, but found some in output:\n%s", body)
+}
+}
+
+func TestDefender_TimeSeriesHandler_IncludesExtensions(t *testing.T) {
+d := newTestDefender()
+
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name: "ts-ext",
+data: map[string]interface{}{"ts_counter": 55},
+})
+
+req := httptest.NewRequest("GET", "/timeseries?period=1&interval=1h", nil)
+w := httptest.NewRecorder()
+d.TimeSeriesHandler(w, req)
+
+if w.Code != http.StatusOK {
+t.Fatalf("Expected 200, got %d", w.Code)
+}
+
+var resp TimeSeriesResponse
+if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+t.Fatalf("Failed to decode timeseries response: %v", err)
+}
+
+if resp.Extensions == nil {
+t.Fatal("Expected extensions field to be non-nil")
+}
+
+extData, ok := resp.Extensions["ts-ext"]
+if !ok {
+t.Fatal("Expected 'ts-ext' key in extensions")
+}
+
+dataMap, ok := extData.(map[string]interface{})
+if !ok {
+t.Fatalf("Expected map, got %T", extData)
+}
+
+if dataMap["ts_counter"] != float64(55) {
+t.Errorf("Expected ts_counter=55, got %v", dataMap["ts_counter"])
+}
+}
+
+func TestDefender_TimeSeriesHandler_NoExtensions_OmitsField(t *testing.T) {
+d := newTestDefender()
+
+req := httptest.NewRequest("GET", "/timeseries?period=1&interval=1h", nil)
+w := httptest.NewRecorder()
+d.TimeSeriesHandler(w, req)
+
+if w.Code != http.StatusOK {
+t.Fatalf("Expected 200, got %d", w.Code)
+}
+
+var raw map[string]interface{}
+if err := json.NewDecoder(w.Body).Decode(&raw); err != nil {
+t.Fatalf("Failed to decode timeseries response: %v", err)
+}
+
+if _, exists := raw["extensions"]; exists {
+t.Error("Expected 'extensions' field to be absent when no providers registered")
+}
+}
+
+func TestSanitizePrometheusName(t *testing.T) {
+tests := []struct {
+input    string
+expected string
+}{
+{"my-provider", "my_provider"},
+{"My Provider", "my_provider"},
+{"hit.count", "hit_count"},
+{"sql-injection-detector", "sql_injection_detector"},
+{"already_valid", "already_valid"},
+{"has spaces", "has_spaces"},
+}
+
+for _, tt := range tests {
+t.Run(tt.input, func(t *testing.T) {
+got := sanitizePrometheusName(tt.input)
+if got != tt.expected {
+t.Errorf("sanitizePrometheusName(%q) = %q, want %q", tt.input, got, tt.expected)
+}
+})
+}
+}
+
+func TestToFloat64(t *testing.T) {
+tests := []struct {
+input    interface{}
+expected float64
+ok       bool
+}{
+{int(42), 42.0, true},
+{int32(10), 10.0, true},
+{int64(100), 100.0, true},
+{float32(3.14), float64(float32(3.14)), true},
+{float64(2.71), 2.71, true},
+{uint(5), 5.0, true},
+{uint32(7), 7.0, true},
+{uint64(9), 9.0, true},
+{"string", 0, false},
+{true, 0, false},
+{nil, 0, false},
+}
+
+for _, tt := range tests {
+got, ok := toFloat64(tt.input)
+if ok != tt.ok {
+t.Errorf("toFloat64(%v): ok=%v, want %v", tt.input, ok, tt.ok)
+}
+if ok && got != tt.expected {
+t.Errorf("toFloat64(%v) = %v, want %v", tt.input, got, tt.expected)
+}
+}
+}
+
+// ─── Race-condition tests for StatsDataProvider ───────────────────────────────
+
+// concurrentStatsProvider is a thread-safe mock StatsDataProvider used in
+// concurrency tests. It deliberately uses its own mutex to simulate a real
+// provider that tracks internal state.
+type concurrentStatsProvider struct {
+name    string
+mu      sync.Mutex
+counter int64
+}
+
+func (p *concurrentStatsProvider) Name() string { return p.name }
+func (p *concurrentStatsProvider) GetStats() (map[string]interface{}, error) {
+p.mu.Lock()
+defer p.mu.Unlock()
+p.counter++
+return map[string]interface{}{"calls": p.counter}, nil
+}
+
+// TestDefender_StatsProvider_RaceCondition_ConcurrentRegisterAndCollect
+// exercises RegisterStatsProvider and collectExtensionStats from many goroutines
+// simultaneously. Run with `go test -race` to detect data races.
+func TestDefender_StatsProvider_RaceCondition_ConcurrentRegisterAndCollect(t *testing.T) {
+d := newTestDefender()
+
+const goroutines = 50
+
+var wg sync.WaitGroup
+// Half of the goroutines register providers; the other half collect stats.
+for i := 0; i < goroutines; i++ {
+wg.Add(1)
+go func(idx int) {
+defer wg.Done()
+if idx%2 == 0 {
+// Register a provider (duplicates are silently ignored, that's OK)
+name := fmt.Sprintf("provider-%d", idx%5) // 5 unique names
+d.RegisterStatsProvider(&concurrentStatsProvider{name: name})
+} else {
+// Collect stats while registrations may be happening
+_ = d.collectExtensionStats()
+}
+}(i)
+}
+wg.Wait()
+
+// Verify all 5 unique providers ended up registered exactly once
+d.mu.RLock()
+count := len(d.statsProviders)
+d.mu.RUnlock()
+if count > 5 {
+t.Errorf("Expected at most 5 providers (one per unique name), got %d", count)
+}
+}
+
+// TestDefender_StatsProvider_RaceCondition_ConcurrentGetStatsAndRegister
+// calls GetStats (HTTP handler) concurrently with RegisterStatsProvider.
+func TestDefender_StatsProvider_RaceCondition_ConcurrentGetStatsAndRegister(t *testing.T) {
+d := newTestDefender()
+
+var wg sync.WaitGroup
+for i := 0; i < 20; i++ {
+wg.Add(1)
+go func(idx int) {
+defer wg.Done()
+if idx%2 == 0 {
+req := httptest.NewRequest("GET", "/stats", nil)
+w := httptest.NewRecorder()
+d.GetStats(w, req)
+if w.Code != http.StatusOK {
+t.Errorf("GetStats returned %d", w.Code)
+}
+} else {
+d.RegisterStatsProvider(&concurrentStatsProvider{
+name: fmt.Sprintf("p%d", idx),
+})
+}
+}(i)
+}
+wg.Wait()
+}
+
+// TestDefender_StatsProvider_RaceCondition_ConcurrentMetricsAndRegister
+// calls MetricsHandler concurrently with RegisterStatsProvider.
+func TestDefender_StatsProvider_RaceCondition_ConcurrentMetricsAndRegister(t *testing.T) {
+d := newTestDefender()
+
+var wg sync.WaitGroup
+for i := 0; i < 20; i++ {
+wg.Add(1)
+go func(idx int) {
+defer wg.Done()
+if idx%2 == 0 {
+req := httptest.NewRequest("GET", "/metrics", nil)
+w := httptest.NewRecorder()
+d.MetricsHandler(w, req)
+} else {
+d.RegisterStatsProvider(&concurrentStatsProvider{
+name: fmt.Sprintf("mp%d", idx),
+})
+}
+}(i)
+}
+wg.Wait()
+}
+
+// TestDefender_StatsProvider_RaceCondition_HighConcurrency_CollectOnly stresses
+// collectExtensionStats with many concurrent readers after providers are pre-registered.
+func TestDefender_StatsProvider_RaceCondition_HighConcurrency_CollectOnly(t *testing.T) {
+d := newTestDefender()
+
+// Pre-register several providers before starting goroutines
+for i := 0; i < 5; i++ {
+d.RegisterStatsProvider(&concurrentStatsProvider{
+name: fmt.Sprintf("pre-provider-%d", i),
+})
+}
+
+var wg sync.WaitGroup
+for i := 0; i < 100; i++ {
+wg.Add(1)
+go func() {
+defer wg.Done()
+result := d.collectExtensionStats()
+if result == nil {
+t.Errorf("Expected non-nil result with pre-registered providers")
+}
+}()
+}
+wg.Wait()
+}
+
+// ─── Benchmarks for StatsDataProvider code paths ─────────────────────────────
+
+// BenchmarkCollectExtensionStats_NoProviders measures the fast-path cost when
+// no StatsDataProviders are registered (should be near zero).
+func BenchmarkCollectExtensionStats_NoProviders(b *testing.B) {
+d := newTestDefender()
+b.ResetTimer()
+for i := 0; i < b.N; i++ {
+_ = d.collectExtensionStats()
+}
+}
+
+// BenchmarkCollectExtensionStats_OneProvider measures cost with a single provider.
+func BenchmarkCollectExtensionStats_OneProvider(b *testing.B) {
+d := newTestDefender()
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name: "bench-provider",
+data: map[string]interface{}{"counter": int64(42)},
+})
+b.ResetTimer()
+for i := 0; i < b.N; i++ {
+_ = d.collectExtensionStats()
+}
+}
+
+// BenchmarkCollectExtensionStats_FiveProviders measures cost with five providers,
+// which is a realistic upper-bound for most deployments.
+func BenchmarkCollectExtensionStats_FiveProviders(b *testing.B) {
+d := newTestDefender()
+for i := 0; i < 5; i++ {
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name: fmt.Sprintf("provider-%d", i),
+data: map[string]interface{}{"metric_a": int64(i), "metric_b": float64(i) * 1.5},
+})
+}
+b.ResetTimer()
+for i := 0; i < b.N; i++ {
+_ = d.collectExtensionStats()
+}
+}
+
+// BenchmarkGetStats_NoProviders is the baseline: /stats with no extensions.
+func BenchmarkGetStats_NoProviders(b *testing.B) {
+d := newTestDefender()
+b.ResetTimer()
+for i := 0; i < b.N; i++ {
+req := httptest.NewRequest("GET", "/stats", nil)
+w := httptest.NewRecorder()
+d.GetStats(w, req)
+}
+}
+
+// BenchmarkGetStats_WithProviders measures the overhead of extension collection
+// layered on top of the /stats baseline.
+func BenchmarkGetStats_WithProviders(b *testing.B) {
+d := newTestDefender()
+for i := 0; i < 3; i++ {
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name: fmt.Sprintf("p%d", i),
+data: map[string]interface{}{"hits": int64(100 + i)},
+})
+}
+b.ResetTimer()
+for i := 0; i < b.N; i++ {
+req := httptest.NewRequest("GET", "/stats", nil)
+w := httptest.NewRecorder()
+d.GetStats(w, req)
+}
+}
+
+// BenchmarkMetricsHandler_NoProviders is the Prometheus metrics baseline.
+func BenchmarkMetricsHandler_NoProviders(b *testing.B) {
+d := newTestDefender()
+b.ResetTimer()
+for i := 0; i < b.N; i++ {
+req := httptest.NewRequest("GET", "/metrics", nil)
+w := httptest.NewRecorder()
+d.MetricsHandler(w, req)
+}
+}
+
+// BenchmarkMetricsHandler_WithProviders measures extension overhead on /metrics.
+func BenchmarkMetricsHandler_WithProviders(b *testing.B) {
+d := newTestDefender()
+for i := 0; i < 3; i++ {
+d.RegisterStatsProvider(&mockStatsDataProvider{
+name: fmt.Sprintf("prov-%d", i),
+data: map[string]interface{}{"gauge_a": int64(i), "gauge_b": float64(i) * 2.0},
+})
+}
+b.ResetTimer()
+for i := 0; i < b.N; i++ {
+req := httptest.NewRequest("GET", "/metrics", nil)
+w := httptest.NewRecorder()
+d.MetricsHandler(w, req)
+}
+}
+
+// BenchmarkSanitizePrometheusName measures the name sanitization helper.
+func BenchmarkSanitizePrometheusName(b *testing.B) {
+inputs := []string{
+"my-extension-name",
+"sql injection detector",
+"already_valid_name",
+"Mixed-Case With Spaces",
+}
+b.ResetTimer()
+for i := 0; i < b.N; i++ {
+_ = sanitizePrometheusName(inputs[i%len(inputs)])
 }
 }
