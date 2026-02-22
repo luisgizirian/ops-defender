@@ -800,9 +800,11 @@ location / {
 }
 ```
 
-**Why test-attacks.sh Test 11 fails:** The test expects `/api/users` to return 200, but Ops Defender doesn't implement application routes - only the `/check` auth endpoint. This is correct behavior. The test should either:
-1. Call `/check` endpoint (not `/api/users` directly), OR
-2. Mock an actual backend application behind a proxy
+**Test 12 (Legitimate Request)** now passes correctly. The test properly:
+1. Calls the `/check` endpoint with `X-Real-IP` and `X-Original-URI` headers
+2. Sends a single request to avoid rate-limiting detection
+3. Uses a fresh IP (`192.168.100.1`) that doesn't conflict with attack tests
+4. Validates that legitimate requests are allowed through
 
 ## Common Pitfalls
 
@@ -918,45 +920,20 @@ Ops Defender is an **auth validation service**, not an application server. Only 
 
 ## Troubleshooting Common Issues
 
-### Test Failures in test-attacks.sh
+### Test Execution
 
-**Test 11 (Legitimate Request) Always Fails - This is Expected Behavior**
+**test-attacks.sh** validates all attack detection patterns:
+- Tests 1-11: Attack pattern detection (path traversal, SQL injection, XSS, etc.)
+- Test 12: Legitimate request validation 
+- Test 13: Rate limiting detection
 
-The test sends requests to `/api/users` and expects HTTP 200, but Ops Defender returns 403/404. This is **not a bug**.
+The test script automatically:
+- Clears Redis state before running
+- Starts a fresh Ops Defender instance for clean isolation
+- Validates HTTP response codes (403 for blocked, 200 for allowed)
+- Generates a summary report
 
-**Why:**
-- Ops Defender is an **auth validation service**, not an application server
-- It only implements endpoints for defense functionality: `/check`, `/health`, `/stats`, `/report`
-- It does NOT serve application routes like `/api/users`
-
-**The Test is Incorrect:**
-```bash
-# Current test (wrong approach):
-curl http://localhost:8080/api/users  # Returns 403/404 from Ops Defender
-
-# Correct test should use /check endpoint:
-curl -H "X-Real-IP: 192.168.1.200" \
-     -H "X-Original-URI: /api/users" \
-     http://localhost:8080/check      # Returns 200 (allowed)
-```
-
-**Proper Testing Approach:**
-1. Test Ops Defender's `/check` endpoint with various URIs via headers
-2. In production, Nginx calls `/check` then proxies allowed requests to your backend
-3. Your backend application (not Ops Defender) serves `/api/users`
-
-**Integration Flow:**
-```
-Client → Nginx → Ops Defender /check (auth validation)
-                      ↓ 200 (allowed)
-         Nginx → Backend Application /api/users → Client
-```
-
-**To Fix Test 11:**
-Either:
-1. Change test to call `/check` endpoint with proper headers, OR
-2. Accept that this test demonstrates Ops Defender is NOT an application server (expected behavior)
-3. In a real setup, run a mock backend alongside Ops Defender for full integration testing
+All tests now pass consistently. Run with: `./scripts/test-attacks.sh`
 
 ### Build/Compile Errors
 

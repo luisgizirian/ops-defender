@@ -777,12 +777,7 @@ The test script validates:
 - ✓ Rate limit enforcement
 - ✓ Legitimate traffic handling
 
-> **Note on Test 11:** This test currently fails because it attempts to access `/api/users` directly on Ops Defender, which only implements auth validation endpoints (`/check`, `/health`, `/stats`, `/report`). In production, Nginx calls Ops Defender's `/check` endpoint for validation, then proxies allowed requests to your backend application. To properly test legitimate requests, use:
-> ```bash
-> curl -H "X-Real-IP: 192.168.1.200" \
->      -H "X-Original-URI: /api/users" \
->      http://localhost:8080/check  # Returns 200 (allowed)
-> ```
+> **Test 12 (Legitimate Request) - Now Passing!** ✅ The test properly calls the `/check` endpoint with `X-Real-IP` and `X-Original-URI` headers, then validates that legitimate requests are allowed (HTTP 200). In production, Nginx uses this same pattern: calls Ops Defender's `/check` endpoint for validation, then proxies allowed requests to your backend application.
 
 ### Load Testing
 
@@ -1174,28 +1169,21 @@ See [DDOS-DEFENSE.md](DDOS-DEFENSE.md) for detailed analysis of DDoS protection 
 
 ## Troubleshooting
 
-### Test 11 (test-attacks.sh) Fails - Expected Behavior
+### Test 12 (test-attacks.sh) - Legitimate Request Now Passing ✅
 
-**Symptom:** Test 11 "Legitimate Request" returns 403 when accessing `/api/users`
+**Summary:** Test 12 validates that legitimate requests are allowed through the `/check` endpoint. It now passes consistently by:
+1. Calling the `/check` endpoint with `X-Real-IP` and `X-Original-URI` headers
+2. Using a fresh IP that doesn't conflict with other tests
+3. Sending a single request to avoid rate-limiting detection
 
-**Explanation:** This is **not a bug**. Ops Defender is an auth validation service, not an application server. It only implements:
-- `/check` - Auth validation endpoint (for Nginx)
-- `/health` - Health check
-- `/stats` - Statistics
-- `/report` - Reporting
-
-**Why the test is misleading:**
 ```bash
-# Current test (incorrect):
-curl http://localhost:8080/api/users  # Returns 403 (not a valid endpoint)
-
-# Correct approach:
-curl -H "X-Real-IP: 192.168.1.200" \
+# What Test 12 does:
+curl -H "X-Real-IP: 192.168.100.1" \
      -H "X-Original-URI: /api/users" \
-     http://localhost:8080/check      # Returns 200
+     http://localhost:8080/check      # Returns 200 (allowed)
 ```
 
-**In production:** Nginx calls `/check` for validation, then proxies allowed requests to your backend application that serves `/api/users`.
+This correctly tests Ops Defender's auth validation pattern that Nginx uses in production.
 
 ### Defender not blocking suspicious requests
 - Check that `ANALYSIS_THRESHOLD` has been reached (default: 5 requests)
