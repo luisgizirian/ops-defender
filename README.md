@@ -19,7 +19,7 @@ own control.
 ### Why Add This to Your Toolbox
 
 - **Save processing costs** - Stop wasting CPU cycles and database queries on attackers trying SQL injection and path traversal. Your backend only processes legitimate requests.
-- **No replacement of existing security tools** - Complements WAFs, IDS/IPS, and cloud security services by providing an additional layer of defense focused on request patterns and IP blocking
+- **Plays well with existing security tools** - Complements WAFs, IDS/IPS, and cloud security services by providing an additional layer of defense focused on request patterns and IP blocking
 - **Keep resources for paying customers** - Attackers don't fill your request queues or exhaust connection pools. Real users get the capacity they deserve.
 - **Prevent backend crashes before they happen** - Blocks malicious URLs (like 4+ levels of URL encoding) before they reach your app and trigger HTTP 500 errors
 - **Zero slowdown for legit traffic** - Analysis runs in the background (~100ns cache hits). Your customers won't notice it's there.
