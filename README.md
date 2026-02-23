@@ -6,13 +6,6 @@
 > **🤖 EXPERIMENTAL PROJECT NOTICE:**  
 > This project was created as an **experiment with GitHub Copilot** as the primary development tool. While it demonstrates AI-assisted development capabilities and includes comprehensive testing, **we strongly discourage deploying this directly to production without thorough verification and security review by qualified professionals**.  
 >   
-> Before considering production use:  
-> - ✓ **Conduct comprehensive security audits**  
-> - ✓ **Perform extensive testing in staging environments**  
-> - ✓ **Review all code and configurations with your security team**  
-> - ✓ **Understand the risks and limitations**  
-> - ✓ **Have rollback and incident response plans ready**  
->   
 > Use this project for learning, experimentation, and as a foundation to build upon—not as a turnkey security solution.
 
 ---
