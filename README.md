@@ -16,7 +16,7 @@ Ops-Defender helps engineering and security teams detect, correlate, and respond
 to hostile traffic patterns across public web applications and APIs — under their
 own control.
 
-> Discourage abuse and block malicious IPs before they reach your backend applications, saving resources. Bad players do too by not wasting their time and resources on attacks that won't succeed. It's a win-win for everyone.
+> Discourage abuse and block malicious IPs before they reach your backend applications, saving resources. Malicious players do too by not wasting their time and resources on attacks that won't succeed. It's a win-win for everyone.
 
 ### Why Add This to Your Toolbox
 
