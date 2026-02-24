@@ -20,13 +20,13 @@ own control.
 
 - **Save processing costs** - Stop wasting CPU cycles and database queries on attackers trying SQL injection and path traversal. Your backend only processes legitimate requests.
 - **Plays well with existing security tools** - Complements WAFs, IDS/IPS, and cloud security services by providing an additional layer of defense focused on request patterns and IP blocking
-- **Keep resources for paying customers** - Attackers don't fill your request queues or exhaust connection pools. Real users get the capacity they deserve.
+- **Extensible and customizable** - Easily add new detection patterns, integrations, and defensive actions to fit your specific needs. Safeguard your applications with a tailored and private defense layer, standing over ops-defender's shoulders.
+- **Keep resources for real customers** - Attackers don't fill your request queues or exhaust connection pools. Real users get the capacity they deserve.
 - **Prevent backend crashes before they happen** - Blocks malicious URLs (like 4+ levels of URL encoding) before they reach your app and trigger HTTP 500 errors
 - **Zero slowdown for legit traffic** - Analysis runs in the background (~100ns cache hits). Your customers won't notice it's there.
 - **See what's hitting you before it costs money** - Real-time dashboards, Prometheus metrics, detailed attack reports. Know your threat landscape.
 - **No vendor lock-in or per-request pricing** - Self-hosted, open source. Run it on the same box as your app or scale it independently. No usage-based billing surprises.
 - **Works with your existing proxy** - Nginx, Caddy, Traefik, HAProxy, Azure APIM... if it speaks HTTP, it integrates in 15 minutes
-- **Extensible and customizable** - Easily add new detection patterns, integrations, and defensive actions to fit your specific needs
 
 > High-performance HTTP-based request defense system that detects abuse-like suspicious patterns and blocks malicious IPs using deferred analysis.
 >
