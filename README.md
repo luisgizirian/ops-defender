@@ -18,6 +18,8 @@ own control.
 
 ### Why Add This to Your Toolbox
 
+Discourage abuse and block malicious IPs before they reach your backend applications, saving resources. Bad players do too by not wasting their time and resources on attacks that won't succeed. It's a win-win for everyone.
+
 - **Save processing costs** - Stop wasting CPU cycles and database queries on attackers trying SQL injection and path traversal. Your backend only processes legitimate requests.
 - **Plays well with existing security tools** - Complements WAFs, IDS/IPS, and cloud security services by providing an additional layer of defense focused on request patterns and IP blocking
 - **Extensible and customizable** - Easily add new detection patterns, integrations, and defensive actions to fit your specific needs. Safeguard your applications with a tailored and private defense layer, standing over ops-defender's shoulders.
